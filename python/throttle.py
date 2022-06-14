@@ -14,8 +14,7 @@ not_set = NotSet()
 
 def throttle_by_hash_func(
     period: Union[int, float],
-    instance_hash_fn: Union[None, callable] = None,
-    instance_hash: Any = not_set
+    instance_hash_fn: Union[None, callable] = None
 ):
     state = OrderedDict()
 
@@ -24,7 +23,7 @@ def throttle_by_hash_func(
         def wrapper(*args, **kwargs):
             curr_ts = time.time()
             outdated_ts = curr_ts - period
-            hash_key = instance_hash
+            hash_key = not_set
 
             if callable(instance_hash_fn):
                 hash_key = instance_hash_fn(*args, **kwargs)
@@ -48,28 +47,20 @@ def throttle_by_hash_func(
     return decorator
 
 
-@throttle_by_hash_func(period=10, instance_hash='test')
-def test(arg1):
-    print(arg1)
-
-
 @throttle_by_hash_func(period=10, instance_hash_fn=lambda arg1: arg1)
 def test2(arg1):
-    print(arg1)
+    return(arg1)
 
 
 @throttle_by_hash_func(period=10)
-def test3(arg1):
-    print(arg1)
+def test(arg1):
+    return(arg1)
 
 
 if __name__ == '__main__':
-    test('c')
-    test('d')
+    assert test('e') == 'e'
+    assert test('f') == None
 
-    test2('a')
-    test2('a')
-    test2('b')
-
-    test3('e')
-    test3('f')
+    assert test2('a') == 'a'
+    assert test2('a') == None
+    assert test2('b') == 'b'
