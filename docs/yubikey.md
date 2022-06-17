@@ -12,9 +12,7 @@ or alter current key to PEM format
 
     ssh-keygen -p -m PEM
 
-unfortunately 4096 and longer RSA keys are not supported by PIV specification, ECDSA P-384 may become a more secure option in this case
-
-    ssh-keygen -b 384 -t ecdsa -m PEM
+unfortunately 4096 and longer RSA keys are not supported by PIV specification
 
 # Import key into yubikey
 
