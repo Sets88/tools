@@ -1,6 +1,6 @@
 ## Create container in namespace of other container to attach to it with gdb
 
-$ docker run -u0 --pid container:<container>  --privileged -ti --rm --name debugger <image_name_of_original_container> sh
+    $ docker run -u0 --pid container:<container>  --privileged -ti --rm --name debugger <image_name_of_original_container> sh
 
 ## Find pid of target process
 
