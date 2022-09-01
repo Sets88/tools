@@ -6,6 +6,8 @@ last_mem_snapshot = None
 
 
 def mem_profile():
+    global last_mem_snapshot;
+
     snaps = tracemalloc.take_snapshot()
     if last_mem_snapshot:
         previosus_snapshot = last_mem_snapshot
@@ -15,7 +17,7 @@ def mem_profile():
 
     stats = snaps.compare_to(previosus_snapshot, 'lineno')
 
-    with open('prof_%s_%s.log' % (os.getpid(), os.getpid()), 'a') as f:
+    with open('prof_%s_%s.log' % (os.getpid(), os.getppid()), 'a') as f:
         f.write(str(datetime.now()) + '\n')
 
         for stat in list(reversed(sorted(stats, key=lambda i: i.size)))[:20]:
