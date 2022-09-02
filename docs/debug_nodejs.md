@@ -27,3 +27,7 @@ To not block process it's better to do a core dump rather then debug on working 
 ## Start debugger
 
     llnode node --core test.core
+
+## Use v8 * to debug
+
+    (lldb) v8 help
