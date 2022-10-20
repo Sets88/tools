@@ -51,9 +51,23 @@
 For some reason gdb unable to find symbols in live process which not allows to trace stack trace
 but it easiely finds symbols when attaching to core dump this problem appears only in alpine images,
 because some alpine libs are stripped by default and for some reason gdb unable to find nonstripped libs(which was installed above)
-in debian images even slim ones has non-stripped libs, so it possible to see correct stack trace
+in debian images even slim ones has non-stripped libs, so it possible to see correct stack trace without any extra movements
 
-    generate-core-file test.core
+    (gdb ) generate-core-file test.core
+
+
+so with alpine images you can force load musl lib symbols to do that you need to find musl lib memory location and add symbol file for it
+
+    (gdb) info sharedlibrary
+    From                To                  Syms Read   Shared Object Library
+    0x00007f051624c590  0x00007f051647c7b1  Yes         target:/usr/local/lib/libpython3.10.so.1.0
+    0x00007f05165c9070  0x00007f05166107e9  Yes (*)     target:/lib/ld-musl-x86_64.so.1
+    0x00007f0515df4510  0x00007f0515dfbac1  Yes         target:/usr/local/lib/python3.10/lib-dynload/math.cpython-310-x86_64-linux-gnu.so
+    .....
+    (gdb) add-symbol-file /usr/lib/debug/lib/ld-musl-x86_64.so.1.debug  0x00007f05165c9070
+
+after this you can debug running process normal way
+
 
 ## Determine version of python
 
@@ -71,12 +85,34 @@ better to use python on full debian image or assemble python by your own
 
 ## Run gdb on core dump
 
-    gdb python test.core
+    $ gdb python test.core
 
 ## Load gdb python lib
 
-    source libpython.py
+    (gdb) source libpython.py
 
 ## Use py-* to debug
 
-    py-bt
+    (gdb) py-bt
+
+## Memory leak investigation
+
+Sometimes the main object of investigateion is memory leak, we can use core dump to find top rough amount of object instances:
+
+    $ hexdump some_dump | awk '{printf "%s%s%s%s\n%s%s%s%s\n", $5,$4,$3,$2,$9,$8,$7,$6}' | sort | uniq -c | sort -nr | head
+    24798217 0000000000000000
+    22728645 0000000000000001
+    8840204 00007f46c22da0c0
+    4550896 00007f46c22d5f40
+    3965252
+    335843 0000000000000002
+    265495 ffffffffffffffff
+    200475 00007f46c22d5680
+    124736 00007f46c22d7740
+    120437 00007f46c22da600
+
+    $ gdb python some_dump
+    (gdb) info symbol 0x7f46c22d5f40
+    PyTuple_Type in section .data of /usr/local/lib/libpython3.10.so.1.0
+
+Which tells us that there is a posability roughly 4550896 of tuple instances in core dump
