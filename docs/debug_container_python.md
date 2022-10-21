@@ -68,7 +68,6 @@ so with alpine images you can force load musl lib symbols to do that you need to
 
 after this you can debug running process normal way
 
-
 ## Determine version of python
 
     $ python --version
@@ -94,6 +93,23 @@ better to use python on full debian image or assemble python by your own
 ## Use py-* to debug
 
     (gdb) py-bt
+
+## Geting python shell inside working process
+
+Lets imagine you are trying to get shell in python process inside alpine conainer, so you have to install musl-dbg and gdb furthermore you have to find memory location of musl lib
+and use it to load symbol file, next you have to go to original conainer and install rpdb inside its python environment by
+
+    $ pip install rpdb
+
+rpdb will provide you a python shell on tcp port inside of this container, now in debugging container we run command to set breakpoint
+
+    $ gdb -p 6 -ex 'set confirm off' -ex 'add-symbol-file /usr/lib/debug/lib/ld-musl-x86_64.so.1.debug 0x00007fcb648fc070' -ex 'call PyGILState_Ensure(),PyRun_SimpleString("import rpdb; rpdb.set_trace()"),PyGILState_Release($1)' -ex detach -ex quit
+
+go back to original container and connect to port 4444
+
+    nc 127.0.0.1 4444
+
+and whoala you've just got your python shell inside running process
 
 ## Memory leak investigation
 
