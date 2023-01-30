@@ -5,6 +5,8 @@ import sys
 import signal
 import time
 import argparse
+from typing import Optional
+
 import scapy.all as scapy
 
 
@@ -22,7 +24,7 @@ def parse_params() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def send_syn_ping(target_ip_address: str, target_port: int, size_of_packet: int, timeout: int):
+def send_syn_ping(target_ip_address: str, target_port: int, size_of_packet: int, timeout: int) -> Optional[scapy.IP]:
     ip = scapy.IP(dst=target_ip_address)
     tcp = scapy.TCP(sport=scapy.RandShort(), dport=target_port, flags="S")
     raw = scapy.Raw(b"X" * size_of_packet)
@@ -31,17 +33,18 @@ def send_syn_ping(target_ip_address: str, target_port: int, size_of_packet: int,
     return resp
 
 
-def print_response(resp, rtt):
+def print_response(resp: Optional[scapy.IP], rtt: float):
     if resp:
         tcplayer = resp.getlayer(scapy.TCP)
         if tcplayer:
-            print(f'len={resp.len} ip={resp.src} ttl={resp.ttl} {resp.flags} id={resp.id} sport={tcplayer.sport} flags={tcplayer.flags} seq={tcplayer.seq} win={tcplayer.window} rtt={rtt} ms')
+            print(f'len={resp.len} ip={resp.src} ttl={resp.ttl} {resp.flags} id={resp.id} sport={tcplayer.sport} '
+                f'flags={tcplayer.flags} seq={tcplayer.seq} win={tcplayer.window} rtt={rtt} ms')
     else:
         print('No response')
 
 
-def main(params):
-    for i in range(params.count):
+def main(params: argparse.Namespace):
+    for _ in range(params.count):
         start_ts = time.time()
         resp = send_syn_ping(params.host, params.port, params.payload_size, timeout=params.timeout)
         end_ts = time.time()
@@ -68,13 +71,15 @@ def print_results():
 
     print('')
     print(f'--- {params.host} ping statistics ---')
-    print(f'{len(rtt_results)} packets transmitted, {len(successful_rtt_results)} packets received, {packet_loss}% packet loss')
+    print(f'{len(rtt_results)} packets transmitted, {len(successful_rtt_results)} packets received, '
+        f'{packet_loss}% packet loss')
 
     if successful_rtt_results:
-        print(f'round-trip min/avg/max = {min(successful_rtt_results)}/{round(sum(successful_rtt_results) / len(successful_rtt_results), 3)}/{max(successful_rtt_results)} ms')
+        print(f'round-trip min/avg/max = {min(successful_rtt_results)}/'
+            f'{round(sum(successful_rtt_results) / len(successful_rtt_results), 3)}/{max(successful_rtt_results)} ms')
 
 
-def handler(signum, frame):
+def handler(_, __):
     print_results()
     sys.exit(0)
 
