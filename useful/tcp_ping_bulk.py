@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # pip install scapy
 
+import logging
 import sys
 import signal
 import time
 import argparse
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
+
+logging.getLogger("scapy").setLevel(logging.ERROR)
 
 import scapy.all as scapy
 
@@ -18,10 +21,11 @@ rtt_results = []
 def parse_params() -> argparse.Namespace:
     """Parse command line parameters."""
     parser = argparse.ArgumentParser(description='Dump network traffic more extended traffic filter')
-    parser.add_argument('-t', '--timeout', type=int, help='timeout', default=1)
+    parser.add_argument('-t', '--timeout', type=int, help='response timeout', default=1)
     parser.add_argument('-s', '--payload-size', type=int, help='payload size', default=0)
-    parser.add_argument('-c', '--count', type=int, help='port', default=1000)
-    parser.add_argument('-p', '--port', type=int, help='port', default=443)
+    parser.add_argument('-c', '--count', type=int, help='send this amount of packets', default=1000)
+    parser.add_argument('-p', '--port', type=int, help='remot port', default=443)
+    parser.add_argument('-l', '--loss-only', help='print loss percentage only', action='store_true')
     parser.add_argument('host', type=str, help='')
     return parser.parse_args()
 
@@ -36,6 +40,9 @@ def send_syn_ping(target_ip_address: str, target_port: int, size_of_packet: int,
 
 
 def print_response(resp: Optional[scapy.IP], rtt: float):
+    if params.loss_only:
+        return
+
     if resp:
         tcplayer = resp.getlayer(scapy.TCP)
         if tcplayer:
@@ -68,8 +75,21 @@ def main():
 
 
 def print_results():
+    if not rtt_results:
+        if params.loss_only:
+            return
+
+        print('No results')
+        sys.exit(1)
+
+        return
+
     successful_rtt_results = [rtt for rtt in rtt_results if rtt]
     packet_loss = round(100 - (len(successful_rtt_results) / len(rtt_results) * 100), 1)
+
+    if params.loss_only:
+        print(f'{packet_loss}')
+        return
 
     print('')
     print(f'--- {params.host} ping statistics ---')
