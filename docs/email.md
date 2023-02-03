@@ -35,3 +35,7 @@ This record can also be a CNAME record rather then TXT record which may point to
 DMARC record tells what to do with email on violation, it should be written in TXT _dmarc record and contain something like:
 
     v=DMARC1;p=none;sp=quarantine;pct=100;rua=mailto:dmarcreports@example.com;
+
+## Configure MX record
+
+DNS MX record points to the host where incomming email should be sent to

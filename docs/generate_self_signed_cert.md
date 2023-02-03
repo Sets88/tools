@@ -26,7 +26,7 @@
     DNS.1 = *.testing.com
     DNS.2 = testing.com
     DNS.3 = *.testing.dev
-    DNS.2 = testing.dev
+    DNS.4 = testing.dev
 
 # Generate certificate
 
