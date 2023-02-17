@@ -61,4 +61,8 @@ Start wireguard
 
     systemctl start wg-quick@wg0
 
+Enable wireguard to run on system start
+
+    systemctl enable wg-quick@wg0
+
 Send /etc/wireguard/clients/client1.conf file to client
