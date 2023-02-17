@@ -1,4 +1,4 @@
-# Configure server
+# Configure Wireguard VPN
 
 Install wireguard
 
