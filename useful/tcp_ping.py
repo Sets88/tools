@@ -18,7 +18,7 @@ def parse_params() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Dump network traffic more extended traffic filter')
     parser.add_argument('-t', '--timeout', type=int, help='timeout', default=1)
     parser.add_argument('-s', '--payload-size', type=int, help='payload size', default=0)
-    parser.add_argument('-c', '--count', type=int, help='port', default=1000)
+    parser.add_argument('-c', '--count', type=int, help='packets count', default=1000)
     parser.add_argument('-p', '--port', type=int, help='port', default=443)
     parser.add_argument('host', type=str, help='')
     return parser.parse_args()
