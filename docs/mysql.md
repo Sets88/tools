@@ -1,4 +1,5 @@
-# Upsert which doen't increase auto_increment field unlike raw INSERT ... ON DUPLICATE KEY
+# Upsert
+Which doen't increase auto_increment field unlike raw INSERT ... ON DUPLICATE KEY, for cases where most of queries have to update records and just some have to insert
 
     SET @been_updated=NULL;
     UPDATE some_table SET value='some_data' WHERE name='some_name' AND @been_updated := id;
