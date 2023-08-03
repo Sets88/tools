@@ -1,0 +1,4 @@
+kaaedit
+visidata
+clickhouse-connect
+ssh_crypt
