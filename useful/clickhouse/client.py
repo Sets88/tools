@@ -2,6 +2,7 @@ import os
 import sys
 from time import time
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 
 import kaa
 from kaa.cui.main import run
@@ -12,23 +13,29 @@ from ssh_crypt import E
 import clickhouse_connect
 
 
-client = clickhouse_connect.get_client(
-    host=os.environ['CHHOST'],
-    username=os.environ['CHUSER'],
-    password=str(E(os.environ['CHPASS'])),
-    port=os.environ.get('CHPORT', 8123)
-)
+HOST = None
+USERNAME = None
+PASSWORD = None
+PORT = None
 
 
-def execute(sql):
+def execute(sql: str, connection_data: dict):
+    client = clickhouse_connect.get_client(**connection_data)
+
     result = client.query(sql, column_oriented=True)
     data = result.result_rows
     res = [{result.column_names[i]: cell for i, cell in enumerate(x)} for x in data]
     return res
 
 
-async def aexecute(sql):
-    return await asyncio.to_thread(execute, sql)
+async def aexecute(sql: str, connection_data: dict):
+    loop = asyncio.get_running_loop()
+    with ProcessPoolExecutor(max_workers=1) as pool:
+        try:
+            return await loop.run_in_executor(pool, execute, sql, connection_data)
+        except asyncio.CancelledError:
+            for worker in pool._processes.values():
+                worker.terminate()
 
 
 def get_sel(wnd):
@@ -69,12 +76,21 @@ def get_cur_line(wnd):
         return sel
 
 
-async def await_and_print_time(coro):
+async def await_and_print_time(wnd, coro):
     start = time()
     task = asyncio.create_task(coro)
+
     while not task.done():
+        wnd.mainframe._cwnd.timeout(0)
+        key = wnd.mainframe._cwnd.getch()
+
+        if key == 27:
+            task.cancel()
+            break
+
         await asyncio.sleep(0.1)
-        print(f'Running: {round(time() - start, 2)}')
+
+        print(f'Running (press ESC to cancel): {round(time() - start, 2)}s ')
         print('\033[F', end='')
 
     return await task
@@ -89,8 +105,11 @@ def testcommand(wnd):
     selection = sel.strip()
 
     try:
+        data = asyncio.run(await_and_print_time(
+            wnd,
+            aexecute(selection, dict(host=HOST, username=USERNAME, password=PASSWORD, port=PORT)))
+        )
         visidata.vd.run()
-        data = asyncio.run(await_and_print_time(aexecute(selection)))
 
         if not data:
             kaa.app.messagebar.set_message('No rows returned')
@@ -98,6 +117,7 @@ def testcommand(wnd):
 
         visidata.vd.view(data)
     finally:
+        wnd.mainframe.need_refresh = True
         curses.curs_set(1)
         wnd.draw_screen(force=True)
 
@@ -117,4 +137,9 @@ def command_sample(mode):
     })
 
 
-run()
+if __name__ == '__main__':
+    HOST = os.environ['CHHOST']
+    USERNAME = os.environ['CHUSER']
+    PASSWORD = str(E(os.environ['CHPASS']))
+    PORT = os.environ.get('CHPORT', 8123)
+    run()
