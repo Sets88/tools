@@ -34,9 +34,12 @@ async def execute_clickhouse(sql: str, connection_data: dict) -> list[dict]:
         password = connection_data['password'],
     )
 
-    async with conn.cursor(cursor=asynch.cursors.DictCursor) as cursor:
-        await cursor.execute(sql)
-        return await cursor.fetchall()
+    try:
+        async with conn.cursor(cursor=asynch.cursors.DictCursor) as cursor:
+            await cursor.execute(sql)
+            return await cursor.fetchall()
+    finally:
+        conn.close()
 
 
 async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
@@ -51,9 +54,12 @@ async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
         db=connection_data.get('dbname', ''),
     )
 
-    async with conn.cursor(aiomysql.DictCursor) as cur:
-        await cur.execute(sql)
-        return await cur.fetchall()
+    try:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql)
+            return await cur.fetchall()
+    finally:
+        conn.close()
 
 
 async def execute_postgres(sql: str, connection_data: dict) -> list[dict] | None:
@@ -170,12 +176,12 @@ def run_query(wnd: TextEditorWindow):
                 host=HOST, username=USERNAME, password=PASSWORD, port=PORT, engine=ENGINE, dbname=DBNAME
             )))
         )
-        visidata.vd.run()
 
         if not data:
             kaa.app.messagebar.set_message('No rows returned')
             return
 
+        visidata.vd.run()
         visidata.vd.view(data)
     except Exception as exc:
         kaa.app.messagebar.set_message(str(exc))
