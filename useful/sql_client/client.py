@@ -166,9 +166,6 @@ def run_query(wnd: TextEditorWindow):
 
     selection = sel.strip()
 
-    print(wnd)
-    import time; time.sleep(5)
-
     try:
         data = asyncio.run(await_and_print_time(
             wnd,
