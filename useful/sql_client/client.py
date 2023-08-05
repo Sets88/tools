@@ -125,13 +125,10 @@ def get_sel(wnd: TextEditorWindow) -> str:
 def get_cur_line(wnd: TextEditorWindow) -> str | None:
     pos = wnd.cursor.pos
     tol = wnd.cursor.adjust_nextpos(
-        wnd.cursor.pos,
-        wnd.document.gettol(wnd.cursor.pos))
-    eol = wnd.cursor.adjust_nextpos(
-        wnd.cursor.pos,
-        wnd.document.geteol(tol))
+        pos,
+        wnd.document.gettol(pos))
 
-    eol, sel = wnd.screen.document.getline(tol)
+    _, sel = wnd.screen.document.getline(tol)
 
     if sel:
         return sel
