@@ -1,17 +1,18 @@
 import os
-import sys
 from time import time
-from time import sleep
 import asyncio
-from concurrent.futures import ProcessPoolExecutor
 
 import kaa
 from kaa.cui.main import run
-from kaa.addon import command, setup, alt, ctrl, backspace
+from kaa.cui.editor import TextEditorWindow
+from kaa.addon import command
+from kaa.addon import setup
+from kaa.addon import alt
+from kaa.addon import ctrl
+from kaa.addon import backspace
 import visidata
 import curses
 from ssh_crypt import E
-
 
 HOST = None
 USERNAME = None
@@ -21,11 +22,8 @@ ENGINE = None
 DBNAME = None
 
 
-CONNECTION = None
-
-
-
-async def execute_clickhouse(sql: str, connection_data: dict):
+async def execute_clickhouse(sql: str, connection_data: dict) -> list[dict]:
+    # imported here to make this dependency optional
     import asynch
 
     conn = await asynch.connect(
@@ -41,12 +39,13 @@ async def execute_clickhouse(sql: str, connection_data: dict):
         return await cursor.fetchall()
 
 
-async def execute_mysql(sql, connection_data):
+async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
+    # imported here to make this dependency optional
     import aiomysql
 
     conn = await aiomysql.connect(
         host=connection_data['host'],
-        port=int(connection_data.get('port', '3306') or 3306),
+        port=int(connection_data.get('port', 3306) or 3306),
         user=connection_data['username'],
         password=connection_data['password'],
         db=connection_data.get('dbname', ''),
@@ -57,7 +56,8 @@ async def execute_mysql(sql, connection_data):
         return await cur.fetchall()
 
 
-async def execute_postgres(sql, connection_data):
+async def execute_postgres(sql: str, connection_data: dict) -> list[dict] | None:
+    # imported here to make this dependency optional
     import aiopg
     import psycopg2
 
@@ -66,12 +66,8 @@ async def execute_postgres(sql, connection_data):
         DBNAME = sql.strip().split(' ')[1]
         return
 
-    if sql.strip().startswith('\\dt'):
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';"
-
     if sql.strip().startswith('\\d '):
-        sql = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{}'".format(
-            sql.strip().split(' ')[1])
+        sql = f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{sql.strip().split(' ')[1]}'"
     if sql.strip() == ('\\d'):
         sql = "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';"
     if sql.strip().startswith('\\l'):
@@ -93,17 +89,7 @@ async def execute_postgres(sql, connection_data):
         conn.close()
 
 
-def execute(sql: str, connection_data: dict):
-    engine = connection_data.pop('engine')
-    if engine == 'clickhouse':
-        return execute_clickhouse(sql, connection_data)
-    if engine == 'mysql':
-        return execute_mysql(sql, connection_data)
-    if engine == 'postgres':
-        return execute_postgres(sql, connection_data)
-
-
-async def aexecute(sql: str, connection_data: dict):
+async def execute(sql: str, connection_data: dict) -> list[dict] | None:
     engine = connection_data.pop('engine')
     if engine == 'clickhouse':
         return await execute_clickhouse(sql, connection_data)
@@ -113,7 +99,7 @@ async def aexecute(sql: str, connection_data: dict):
         return await execute_postgres(sql, connection_data)
 
 
-def get_sel(wnd):
+def get_sel(wnd: TextEditorWindow) -> str:
     if wnd.screen.selection.is_selected():
         if not wnd.screen.selection.is_rectangular():
             f, t = wnd.screen.selection.get_selrange()
@@ -136,7 +122,7 @@ def get_sel(wnd):
             return '\n'.join(s)
 
 
-def get_cur_line(wnd):
+def get_cur_line(wnd: TextEditorWindow) -> str | None:
     pos = wnd.cursor.pos
     tol = wnd.cursor.adjust_nextpos(
         wnd.cursor.pos,
@@ -151,7 +137,7 @@ def get_cur_line(wnd):
         return sel
 
 
-async def await_and_print_time(wnd, coro):
+async def await_and_print_time(wnd: TextEditorWindow, coro: asyncio.coroutines) -> list[dict] | None:
     start = time()
     task = asyncio.create_task(coro)
 
@@ -171,18 +157,22 @@ async def await_and_print_time(wnd, coro):
     return await task
 
 
-@command('run.clickhouse')
-def testcommand(wnd):
-    sel = get_sel(wnd);
+@command('run.query')
+def run_query(wnd: TextEditorWindow):
+    sel = get_sel(wnd)
+
     if not sel:
         sel = get_cur_line(wnd)
 
     selection = sel.strip()
 
+    print(wnd)
+    import time; time.sleep(5)
+
     try:
         data = asyncio.run(await_and_print_time(
             wnd,
-            aexecute(selection, dict(
+            execute(selection, dict(
                 host=HOST, username=USERNAME, password=PASSWORD, port=PORT, engine=ENGINE, dbname=DBNAME
             )))
         )
@@ -202,14 +192,14 @@ def testcommand(wnd):
 
 
 @setup('kaa.filetype.default.defaultmode.DefaultMode')
-def command_sample(mode):
+def editor(mode):
 
     # register command to the mode
-    mode.add_command(testcommand)
+    mode.add_command(run_query)
 
-    # add key bind th execute 'run.clickhouse'
+    # add key bind th execute 'run.query'
     mode.add_keybinds(keys={
-        (alt, 'r'): 'run.clickhouse',
+        (alt, 'r'): 'run.query',
         (ctrl, 's'): 'file.save',
         (ctrl, 'q'): 'file.quit',
         (alt, backspace): 'edit.backspace.word'
