@@ -24,22 +24,21 @@ DBNAME = None
 
 async def execute_clickhouse(sql: str, connection_data: dict) -> list[dict]:
     # imported here to make this dependency optional
-    import asynch
+    from aiohttp import ClientSession
+    import aiochclient
 
-    conn = await asynch.connect(
-        host=connection_data['host'],
-        port=int(connection_data.get('port', 9000) or 9000),
-        database=connection_data.get('dbname', 'default') or 'default',
-        user=connection_data['username'],
-        password = connection_data['password'],
-    )
+    async with ClientSession() as sess:
+        port = connection_data.get('port', '8123') or '8123'
 
-    try:
-        async with conn.cursor(cursor=asynch.cursors.DictCursor) as cursor:
-            await cursor.execute(sql)
-            return await cursor.fetchall()
-    finally:
-        conn.close()
+        client = aiochclient.ChClient(
+            sess,
+            url=f"http://{connection_data['host']}:{port}",
+            database=connection_data.get('dbname', 'default') or 'default',
+            user=connection_data['username'],
+            password = connection_data['password'],
+        )
+
+        return [dict(x) for x in await client.fetch(sql)]
 
 
 async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
@@ -52,6 +51,7 @@ async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
         user=connection_data['username'],
         password=connection_data['password'],
         db=connection_data.get('dbname', ''),
+        autocommit=True
     )
 
     try:
@@ -168,6 +168,9 @@ def run_query(wnd: TextEditorWindow):
         sel = get_cur_line(wnd)
 
     selection = sel.strip()
+    start = time()
+    end = None
+    message = ''
 
     try:
         data = asyncio.run(await_and_print_time(
@@ -177,15 +180,19 @@ def run_query(wnd: TextEditorWindow):
             )))
         )
 
+        end = time()
+
         if not data:
-            kaa.app.messagebar.set_message('No rows returned')
+            message = 'No rows returned'
             return
 
         visidata.vd.run()
         visidata.vd.view(data)
     except Exception as exc:
-        kaa.app.messagebar.set_message(str(exc))
+        end = time()
+        message = str(exc)
     finally:
+        kaa.app.messagebar.set_message(f'{round(end - start, 2)}s {message}')
         curses.endwin()
         curses.curs_set(1)
         wnd.draw_screen(force=True)
