@@ -1,10 +1,12 @@
 import os
 from time import time
 import asyncio
+from functools import partial
 
 import kaa
 from kaa.cui.main import run
 from kaa.cui.editor import TextEditorWindow
+from kaa.filetype.default import defaultmode
 from kaa.addon import command
 from kaa.addon import setup
 from kaa.addon import alt
@@ -26,6 +28,11 @@ async def execute_clickhouse(sql: str, connection_data: dict) -> list[dict]:
     # imported here to make this dependency optional
     from aiohttp import ClientSession
     import aiochclient
+    global DBNAME
+    db = connection_data.get('dbname', 'default') or 'default'
+
+    if sql.strip().upper().startswith('USE '):
+        db = sql.strip().split(' ')[1].rstrip(';')
 
     async with ClientSession() as sess:
         port = connection_data.get('port', '8123') or '8123'
@@ -33,30 +40,45 @@ async def execute_clickhouse(sql: str, connection_data: dict) -> list[dict]:
         client = aiochclient.ChClient(
             sess,
             url=f"http://{connection_data['host']}:{port}",
-            database=connection_data.get('dbname', 'default') or 'default',
+            database=db,
             user=connection_data['username'],
             password = connection_data['password'],
         )
 
-        return [dict(x) for x in await client.fetch(sql)]
+        data = [dict(x) for x in await client.fetch(sql)]
+
+        if DBNAME != db:
+            DBNAME = db
+
+        return data
 
 
 async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
     # imported here to make this dependency optional
     import aiomysql
+    global DBNAME
+
+    db = connection_data.get('dbname', '')
+
+    if sql.strip().upper().startswith('USE '):
+        db = sql.strip().split(' ')[1].rstrip(';')
 
     conn = await aiomysql.connect(
         host=connection_data['host'],
         port=int(connection_data.get('port', 3306) or 3306),
         user=connection_data['username'],
         password=connection_data['password'],
-        db=connection_data.get('dbname', ''),
+        db=db,
         autocommit=True
     )
+
+    if DBNAME != db:
+        DBNAME = db
 
     try:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(sql)
+
             return await cur.fetchall()
     finally:
         conn.close()
@@ -66,11 +88,12 @@ async def execute_postgres(sql: str, connection_data: dict) -> list[dict] | None
     # imported here to make this dependency optional
     import aiopg
     import psycopg2
+    global DBNAME
+
+    db = connection_data.get('dbname', '')
 
     if sql.strip().startswith('\\c '):
-        global DBNAME
-        DBNAME = sql.strip().split(' ')[1]
-        return
+        db = sql.strip().split(' ')[1].rstrip(';')
 
     if sql.strip().startswith('\\d '):
         sql = f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{sql.strip().split(' ')[1]}'"
@@ -84,8 +107,11 @@ async def execute_postgres(sql: str, connection_data: dict) -> list[dict] | None
         port=int(connection_data.get('port', '5432') or 5432),
         user=connection_data['username'],
         password=connection_data['password'],
-        dbname=connection_data.get('dbname', ''),
+        dbname=db,
     )
+
+    if DBNAME != db:
+        DBNAME = db
 
     try:
         async with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -160,6 +186,22 @@ async def await_and_print_time(wnd: TextEditorWindow, coro: asyncio.coroutines) 
     return await task
 
 
+def fix_visidata_curses():
+    if visidata.color.colors.color_pairs:
+        for (fg, bg), (pairnum, _) in visidata.color.colors.color_pairs.items():
+            curses.init_pair(pairnum, fg, bg)
+
+
+def fix_kaa_curses(wnd):
+    curses.endwin()
+    kaa.app.show_cursor(1)
+
+    for pairnum, (fg, bg) in enumerate(kaa.app.colors.pairs.keys()):
+        curses.init_pair(pairnum, fg, bg)
+
+    wnd.draw_screen(force=True)
+
+
 @command('run.query')
 def run_query(wnd: TextEditorWindow):
     sel = get_sel(wnd)
@@ -186,23 +228,29 @@ def run_query(wnd: TextEditorWindow):
             message = 'No rows returned'
             return
 
+        fix_visidata_curses()
         visidata.vd.run()
         visidata.vd.view(data)
     except Exception as exc:
         end = time()
         message = str(exc)
     finally:
+        wnd.document.set_title(f"{ENGINE} {HOST} {DBNAME}")
         kaa.app.messagebar.set_message(f'{round(end - start, 2)}s {message}')
-        curses.endwin()
-        curses.curs_set(1)
-        wnd.draw_screen(force=True)
+        fix_kaa_curses(wnd)
+
+
+def on_keypressed(self, wnd, event, s, commands, candidate):
+    wnd.document.set_title(f"{ENGINE} {HOST} {DBNAME}")
+    return self._on_keypressed(wnd, event, s, commands, candidate)
 
 
 @setup('kaa.filetype.default.defaultmode.DefaultMode')
 def editor(mode):
-
     # register command to the mode
     mode.add_command(run_query)
+    mode._on_keypressed = mode.on_keypressed
+    mode.on_keypressed = partial(on_keypressed, mode)
 
     # add key bind th execute 'run.query'
     mode.add_keybinds(keys={
@@ -214,6 +262,7 @@ def editor(mode):
 
 
 if __name__ == '__main__':
+    defaultmode.DefaultMode.SHOW_LINENO = True
     HOST = os.environ['CLHOST']
     USERNAME = os.environ['CLUSER']
     PASSWORD = str(E(os.environ['CLPASS']))
