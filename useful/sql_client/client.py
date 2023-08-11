@@ -13,7 +13,7 @@ from kaa.addon import alt
 from kaa.addon import ctrl
 from kaa.addon import backspace
 from kaa.theme import Style
-from kaa.syntax_highlight import Span, SingleToken, Tokenizer, Keywords
+from kaa.syntax_highlight import Span, SingleToken, Tokenizer, Keywords, Token
 import visidata
 import curses
 from ssh_crypt import E
@@ -278,7 +278,7 @@ KEYWORDS = [
 ]
 
 
-def sqleditor_tokens():
+def sqleditor_tokens() -> list[tuple[str, Token]]:
     return [
         ('comment1', Span('comment', r'--', '$')),
         ('comment2', Span('comment', r'\#', '$')),
@@ -289,7 +289,7 @@ def sqleditor_tokens():
     ]
 
 
-def make_tokenizer():
+def make_tokenizer() -> Tokenizer:
     return Tokenizer(tokens=sqleditor_tokens())
 
 # -----------
