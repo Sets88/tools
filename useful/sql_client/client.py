@@ -12,6 +12,8 @@ from kaa.addon import setup
 from kaa.addon import alt
 from kaa.addon import ctrl
 from kaa.addon import backspace
+from kaa.theme import Style
+from kaa.syntax_highlight import Span, SingleToken, Tokenizer, Keywords
 import visidata
 import curses
 from ssh_crypt import E
@@ -50,7 +52,7 @@ async def execute_clickhouse(sql: str, connection_data: dict) -> list[dict]:
         if DBNAME != db:
             DBNAME = db
 
-        return data
+        return (data, '')
 
 
 async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
@@ -78,8 +80,12 @@ async def execute_mysql(sql: str, connection_data: dict) -> list[dict]:
     try:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(sql)
+            data = await cur.fetchall()
 
-            return await cur.fetchall()
+            if not data and cur.rowcount:
+                return (data, f'{cur.rowcount} rows affected')
+
+            return (data, f'{cur.rowcount} rows returned')
     finally:
         conn.close()
 
@@ -94,6 +100,7 @@ async def execute_postgres(sql: str, connection_data: dict) -> list[dict] | None
 
     if sql.strip().startswith('\\c '):
         db = sql.strip().split(' ')[1].rstrip(';')
+        sql = ''
 
     if sql.strip().startswith('\\d '):
         sql = f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{sql.strip().split(' ')[1]}'"
@@ -116,7 +123,13 @@ async def execute_postgres(sql: str, connection_data: dict) -> list[dict] | None
     try:
         async with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             await cur.execute(sql)
-            return await cur.fetchall()
+            rowcount = cur.rowcount
+            try:
+                data = await cur.fetchall()
+            except psycopg2.ProgrammingError:
+                return ([], f'{rowcount} rows affected')
+
+            return (data, f'{rowcount} rows returned')
     finally:
         conn.close()
 
@@ -228,9 +241,11 @@ def run_query(wnd: TextEditorWindow):
             message = 'No rows returned'
             return
 
+        rows, message = data
+
         fix_visidata_curses()
         visidata.vd.run()
-        visidata.vd.view(data)
+        visidata.vd.view(rows)
     except Exception as exc:
         end = time()
         message = str(exc)
@@ -244,6 +259,43 @@ def on_keypressed(self, wnd, event, s, commands, candidate):
     wnd.document.set_title(f"{ENGINE} {HOST} {DBNAME}")
     return self._on_keypressed(wnd, event, s, commands, candidate)
 
+
+## Syntax highlight ##
+
+sql_editor_themes = {
+    'basic': [
+        Style('section', 'Blue', None, bold=True),
+        Style('string', 'Green', None, bold=True),
+        Style('keywords', 'Orange', None, bold=True),
+        Style('string', 'Green', None, bold=True),
+        Style('number', 'Yellow', None, bold=True),
+    ]
+}
+
+
+KEYWORDS = [
+    'SELECT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'COLUMN', 'USE',
+    'FROM', 'JOIN', 'OUTER', 'INNER', 'LIMIT', 'ORDER BY', 'AS',
+    'SHOW', 'FROM', 'WHERE', 'DESC', 'TABLES', 'CREATE', 'TABLE',
+    'SET', 'IS', 'NOT', 'NULL'
+]
+
+
+def sqleditor_tokens():
+    return [
+        ('comment1', Span('comment', r'--', '$')),
+        ('comment2', Span('comment', r'\#', '$')),
+        ("string1", Span('string', '"', '"', escape='\\')),
+        ("string2", Span('string', "'", "'", escape='\\')),
+        ("number", SingleToken('number', [r'\b[0-9]+(\.[0-9]*)*\b', r'\b\.[0-9]+\b'])),
+        ("keyword", Keywords('keyword', KEYWORDS)),
+    ]
+
+
+def make_tokenizer():
+    return Tokenizer(tokens=sqleditor_tokens())
+
+# -----------
 
 @setup('kaa.filetype.default.defaultmode.DefaultMode')
 def editor(mode):
@@ -259,6 +311,10 @@ def editor(mode):
         (ctrl, 'q'): 'file.quit',
         (alt, backspace): 'edit.backspace.word'
     })
+
+    # Syntax highlight
+    mode.tokenizer = make_tokenizer()
+    mode.themes.append(sql_editor_themes)
 
 
 if __name__ == '__main__':
