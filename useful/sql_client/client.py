@@ -266,7 +266,6 @@ sql_editor_themes = {
     'basic': [
         Style('section', 'Blue', None, bold=True),
         Style('string', 'Green', None, bold=True),
-        Style('keywords', 'Orange', None, bold=True),
         Style('string', 'Green', None, bold=True),
         Style('number', 'Yellow', None, bold=True),
     ]
