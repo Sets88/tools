@@ -42,7 +42,7 @@ class Server:
             '0.0.0.0',
             8888
         )
-        
+
         async with server:
             await server.serve_forever()
 

@@ -111,7 +111,7 @@ Creation of user may be done with a script file let's say "create_wg_user.sh":
     cat << EOF >> /etc/wireguard/wg0.conf
     [Peer]
     PublicKey = $(cat /etc/wireguard/clients/${USERNAME}.pub)
-    AllowedIPs = 10.0.0.2/32
+    AllowedIPs = ${IP}/32
 
     EOF
 
