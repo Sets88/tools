@@ -18,7 +18,7 @@ class Task:
         return self.future.result()
 
     async def await_result_async(self, callback, *args, **kwargs):
-        await self.task
+        await asyncio.wait([self.task])
         await callback(*args, task=self, **kwargs)
 
     def await_result_sync(self, callback, *args, **kwargs):
@@ -26,12 +26,9 @@ class Task:
         new_args = args[0:-1]
         callback(*new_args, task=self, **kwargs)
 
-    async def cancel(self):
-        await self.future.cancel()
-        await self.task.cancel()
-
-        if self.await_result_task:
-            await self.await_result_task.cancel()
+    def cancel(self):
+        self.task.cancel()
+        self.future.cancel()
 
     def add_done_callback(self, callback, *args, **kwargs):
         if asyncio.iscoroutinefunction(callback):
@@ -72,8 +69,6 @@ class AsyncPool:
             future.set_result(result)
         except Exception as exc:
             future.set_exception(exc)
-        finally:
-            self.semaphore.release()
 
     async def push(self, coro: asyncio.coroutine, timeout: Union[None, int, float] = None):
         await self.semaphore.acquire()
@@ -83,6 +78,8 @@ class AsyncPool:
         running_task = asyncio.create_task(
             self.run_task(coro, future=future, timeout=timeout)
         )
+
+        running_task.add_done_callback(lambda _: self.semaphore.release() and coro.cr_running and coro.cr_running.close())
 
         self.tasks.add(running_task)
 
@@ -101,6 +98,8 @@ def print_res(inp: int, task: Task):
         output = task.future.result()
     except asyncio.TimeoutError:
         output = 'Timeout'
+    except asyncio.CancelledError:
+        output = 'Cancelled'
 
     print(inp, output)
 
@@ -110,6 +109,8 @@ async def await_and_print_result(inp: int, task: Task):
         output = await task.get_result()
     except asyncio.TimeoutError:
         output = 'Timeout'
+    except asyncio.CancelledError:
+        output = 'Cancelled'
 
     print(inp, output)
 
