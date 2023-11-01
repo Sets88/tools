@@ -29,7 +29,9 @@ class Task:
     async def cancel(self):
         await self.future.cancel()
         await self.task.cancel()
-        await self.task.cancel()
+
+        if self.await_result_task:
+            await self.await_result_task.cancel()
 
     def add_done_callback(self, callback, *args, **kwargs):
         if asyncio.iscoroutinefunction(callback):
