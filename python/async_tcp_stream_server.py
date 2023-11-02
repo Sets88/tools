@@ -1,6 +1,7 @@
 import random
 import asyncio
 import weakref
+import ssl
 
 
 async def data_producer(queues: weakref.WeakSet[asyncio.Queue]):
@@ -37,10 +38,15 @@ class Server:
             writer.close()
 
     async def run(self):
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.load_cert_chain(certfile='path/to/certfile', keyfile='path/to/keyfile')
+
+        # remove ssl param to disable ssl
         server = await asyncio.start_server(
             self.handle_connection,
             '0.0.0.0',
-            8888
+            8888,
+            ssl=ssl_context
         )
 
         async with server:

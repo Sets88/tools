@@ -46,7 +46,7 @@ async def client():
             sock=sock
         )
 
-        asyncio.create_task(protocol.writer())
+        writer_task = asyncio.create_task(protocol.writer())
 
         try:
             while True:
@@ -54,7 +54,6 @@ async def client():
                     await protocol.send(b'test')
                     data = await asyncio.wait_for(protocol.recv(), timeout=10)
                     print(data)
-                    raise Exception()
                 except asyncio.TimeoutError:
                     print('Nothing received in 10 seconds')
         finally:
