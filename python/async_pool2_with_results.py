@@ -79,7 +79,7 @@ class AsyncPool:
             self.run_task(coro, future=future, timeout=timeout)
         )
 
-        running_task.add_done_callback(lambda _: self.semaphore.release() and coro.cr_running and coro.cr_running.close())
+        running_task.add_done_callback(lambda _: self.semaphore.release())
 
         self.tasks.add(running_task)
 
