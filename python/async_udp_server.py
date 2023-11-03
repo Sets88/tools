@@ -73,7 +73,7 @@ class Server:
     async def run(self):
         loop = asyncio.get_running_loop()
 
-        transport, protocol = await loop.create_datagram_endpoint(
+        _, protocol = await loop.create_datagram_endpoint(
             lambda: DatagramProtocol(recvq=self.recvq, sndq=self.sendq),
             local_addr=('0.0.0.0', 12312)
         )
@@ -94,10 +94,10 @@ async def connection_handler(connection: Connection):
         await connection.send(b'!!!')
 
 
-async def server():
+async def main():
     server = Server(connection_handler)
     await server.run()
 
 
 if __name__ == '__main__':
-    asyncio.run(server())
+    asyncio.run(main())
