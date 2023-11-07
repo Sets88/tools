@@ -1,3 +1,4 @@
+import socket
 import random
 import asyncio
 import weakref
@@ -48,6 +49,9 @@ class Server:
             8888,
             ssl=ssl_context
         )
+
+        for sock in server.sockets:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
         async with server:
             await server.serve_forever()
