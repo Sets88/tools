@@ -10,6 +10,7 @@ async def client():
         ssl_context.verify_mode = ssl.CERT_NONE
 
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         sock.connect(('127.0.0.1', 12312))
