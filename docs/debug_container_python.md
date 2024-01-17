@@ -132,3 +132,36 @@ Sometimes the main object of investigateion is memory leak, we can use core dump
     PyTuple_Type in section .data of /usr/local/lib/libpython3.10.so.1.0
 
 Which tells us that there is a posability roughly 4550896 of tuple instances in core dump
+
+You can also connect gdb to the process and try to find the leaking point, for example, like this:
+
+Attach to a process
+
+    $ gdb -p 6
+
+Acquire GIL
+
+    call PyGILState_Ensure()
+
+Get the last 10,000 objects
+
+    call PyRun_SimpleString("import gc; objs = gc.get_objects()[-10000:]")
+
+Prepare a dictionary where the key is the object's id and the value is a list of object ids that reference it
+
+    call PyRun_SimpleString("import itertools; objs2 = {id(y): [id(z) for z in gc.get_referrers(y)] for y in [x for x in objs]}")
+
+Invert the dictionary, where the key is the object's id and the value is a list of object ids it references, and sort by the number of references
+
+    call PyRun_SimpleString("open('/tmp/debug1', 'w').write(str(sorted(tuple({i: [k for k, v in objs2.items() if i in v] for i in list(itertools.chain(*objs2.values()))}.items()), key=lambda i: len(i[1]))))")
+
+In the simplest cases, a memory leak occurs in the places where there are the most references to objects
+
+Save the contents of the object with the most references for further investigation
+
+    call PyRun_SimpleString("import ctypes; open('/tmp/debug2', 'w').write(str(ctypes.cast(139868276332736, ctypes.py_object).value))")
+
+Release GIL
+
+    call PyGILState_Release($1)
+
