@@ -145,11 +145,11 @@ Acquire GIL
 
 Get the last 10,000 objects
 
-    call PyRun_SimpleString("import gc; objs = gc.get_objects()[-10000:]")
+    call PyRun_SimpleString("import gc; objs = gc.get_objects()[-1000:]")
 
 Prepare a dictionary where the key is the object's id and the value is a list of object ids that reference it
 
-    call PyRun_SimpleString("import itertools; objs2 = {id(y): [id(z) for z in gc.get_referrers(y)] for y in [x for x in objs]}")
+    call PyRun_SimpleString("import itertools; objs2 = {id(y): [id(z) for z in gc.get_referrers(y)[-1000:]] for y in [x for x in objs]}")
 
 Invert the dictionary, where the key is the object's id and the value is a list of object ids it references, and sort by the number of references
 
