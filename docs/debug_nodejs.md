@@ -13,10 +13,17 @@
 
 # Install required for debugger packages
 
+## Debian/Ubuntu
+
     apt install -y lldb git python3 make g++
     apt install -y gdb # Will use it to create a core dump
     npm install -g llnode
 
+## Alpine
+
+    apk add lldb git python3 make g++ py3-lldb
+    apk add gdb # Will use it to create a core dump
+    npm install -g llnode
 
 ## Do a core dump of a process
 
@@ -31,3 +38,17 @@ To not block process it's better to do a core dump rather then debug on working 
 ## Use v8 * to debug
 
     (lldb) v8 help
+
+in case of memory leak investigation
+
+    (lldb) v8 findjsobjects
+
+to find objects amounts and sizes
+
+    (lldb) v8 findjsinstances -v -n 100 Object
+
+to print 100 detailed objects dumps of type Object, run same command to get next 100
+
+    (lldb) v8 findrefs -v 0x381513e83d31
+
+to find all references to an object with id 0x381513e83d31
