@@ -6,7 +6,7 @@
 
 # Regex to split output
 
-    to open it in visidata, after open hit ":" to split into columns
+    to open it in visidata, after open hit "space" and type "split-col" to split into columns
 
     ^(\[pid\s+[0-9]+\]\s+)?([0-9\.]+)\s+\(\+\s+([0-9\.]+)\)(.*)(\s=\s.*)<([0-9\.]+)>$
 
