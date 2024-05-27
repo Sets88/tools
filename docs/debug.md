@@ -8,7 +8,7 @@
 
     to open it in visidata, after open hit ":" to split into columns
 
-    ^\[pid\s+([0-9]+)\]\s+([0-9\.]+)\s+\(\+\s+([0-9\.]+)\)((.*)(\s=\s([0-9a-fx]+)\s<([0-9\.]+)>)|.*)$
+    ^(\[pid\s+[0-9]+\]\s+)?([0-9\.]+)\s+\(\+\s+([0-9\.]+)\)(.*)(\s=\s.*)<([0-9\.]+)>$
 
 ## Summarise time spent in syscall grouped by syscall
 
