@@ -1,0 +1,1552 @@
+<head>
+<link rel="icon" type="image/png" href=../ico_rj.png sizes="16x16" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+<style type="text/css">
+h2 {background-color:#cff; font: 22px Arial, sans-serif; font-style: italic}
+.tag {font: 12px Arial, sans-serif; font-style: bold;}
+.toc {font: 14px Arial, sans-serif; font-style: bold; background: aqua; float: right; margin: 1em; padding: 1em; } p.foo { margin-top:0.5em; text-indent: -2em; margin-left: 2em; }
+tt, pre {
+  background-color: #EFE;
+  white-space: pre; 
+  font-family: "FreeMono",monospace; 
+  font-weight: 600;
+  font-size: 100%; 
+}
+</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL: Building the best INDEX for a given SELECT
+</title><h1>MySQL: Building the best INDEX for a given SELECT
+</h1>
+<div class=toc><h3>Table of Contents</h3>
+<a href=#the_problem>The Problem</a>
+<p class=foo><a href=#algorithm>Algorithm</a>
+<p class=foo><a href=#digression>Digression</a>
+<p class=foo><a href=#first_some_examples>First, some examples</a>
+<p class=foo><a href=#algorithm_step_1_where_column_const_>Algorithm, Step 1 (WHERE "column = const")</a>
+<p class=foo><a href=#algorithm_step_2>Algorithm, Step 2</a>
+<p class=foo><a href=#algorithm_step_2a_one_range_>Algorithm, Step 2a (one range)</a>
+<p class=foo><a href=#algorithm_step_2b_group_by_>Algorithm, Step 2b (GROUP BY)</a>
+<p class=foo><a href=#algorithm_step_2c_order_by_>Algorithm, Step 2c (ORDER BY)</a>
+<p class=foo><a href=#algorithm_end>Algorithm end</a>
+<p class=foo><a href=#limitations>Limitations</a>
+<p class=foo><a href=#stop_after_equality_test>Stop after equality test</a>
+<p class=foo><a href=#flags_and_low_cardinality>Flags and Low Cardinality</a>
+<p class=foo><a href=#_covering_indexes>"Covering" Indexes</a>
+<p class=foo><a href=#redundant_excessive_indexes>Redundant/Excessive Indexes</a>
+<p class=foo><a href=#optimizer_picks_order_by>Optimizer picks ORDER BY</a>
+<p class=foo><a href=#or>OR</a>
+<p class=foo><a href=#text_blob>TEXT / BLOB</a>
+<p class=foo><a href=#dates>DATEs</a>
+<p class=foo><a href=#explain_key_len>EXPLAIN Key_len</a>
+<p class=foo><a href=#in>IN</a>
+<p class=foo><a href=#in_select_>IN ( SELECT ... )</a>
+<p class=foo><a href=#index_condition_pushdown_icp_>Index Condition Pushdown (ICP)</a>
+<p class=foo><a href=#explode_implode>Explode/Implode</a>
+<p class=foo><a href=#many_to_many_mapping_table>Many-to-Many Mapping table</a>
+<p class=foo><a href=#other_primary_key_patterns>Other Primary Key patterns</a>
+<p class=foo><a href=#subqueries_and_unions>Subqueries and UNIONs</a>
+<p class=foo><a href=#joins>JOINs</a>
+<p class=foo><a href=#derived_table>Derived table</a>
+<p class=foo><a href=#partitioning>PARTITIONing</a>
+<p class=foo><a href=#fulltext>FULLTEXT</a>
+<p class=foo><a href=#search_multiple_columns_for_a_substring>Search multiple columns for a substring</a>
+<p class=foo><a href=#signs_of_a_newbie>Signs of a Newbie</a>
+<p class=foo><a href=#speeding_up_wp_postmeta>Speeding up wp_postmeta</a>
+<p class=foo><a href=#explain>EXPLAIN</a>
+<p class=foo><a href=#optimizer_trace>Optimizer Trace</a>
+<p class=foo><a href=#handler_counts>Handler counts</a>
+<p class=foo><a href=#explain_analyze>EXPLAIN ANALYZE</a>
+<p class=foo><a href=#sequence>Sequence</a>
+<p class=foo><a href=#miscellany>Miscellany</a>
+<p class=foo><a href=#postlog>Postlog</a></div><i>Brought to you by Rick James</i><br>
+<p><a name=the_problem><h2>The Problem</h2>
+<br>
+You have a SELECT and you want to build the best INDEX for it.
+This blog is a "cookbook" on how to do that task.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;A short algorithm that works for many simpler SELECTs and helps in complex queries.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Examples of the algorithm, plus digressions into exceptions and variants.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Finally a long list of "other cases".
+<br>
+<br>
+The hope is that a newbie can quickly get up to speed, and his/her INDEXes will no longer
+smack of "newbie".
+<br>
+<br>
+Many edge cases are explained, so even an expert may find something useful here.
+<br>
+<br>
+<a name=algorithm><h2>Algorithm</h2>
+<br>
+Here's the way to approach creating an INDEX, given a SELECT.
+Follow the steps below, gathering columns to put in the INDEX in order.
+When the steps give out, you <i>usually</i> have the 'perfect' index.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;1.&nbsp;&nbsp;Given a <tt>WHERE</tt> with a bunch of expressions connected by <tt>AND</tt>: Include the columns (if any), in any order, that are compared to a constant and not hidden in a function.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;2.&nbsp;&nbsp;You get one more chance to add to the INDEX; do the first of these that applies:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;  2a.  One column used in a 'range' -- <tt>BETWEEN</tt>, <tt>></tt>, <tt>LIKE</tt> w/o leading wildcard, etc.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;  2b.  All columns, in order, of the <tt>GROUP BY</tt>.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;  2c.  All columns, in order, of the <tt>ORDER BY</tt>.
+<br>
+<br>
+<a name=digression><h2>Digression</h2>
+<br>
+This blog assumes you know the basic idea behind having an INDEX.
+Here is a refresher on some of the key points.
+<br>
+<br>
+Virtually all INDEXes in MySQL are structured as
+<a href=https://en.wikipedia.org/wiki/B-tree>BTrees</a><br>
+BTrees allow very efficient for
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Given a key, find the corresponding row(s);
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;"Range scans" -- That is, start at one value for the key and repeatedly find the "next" (or "previous") row.
+<br>
+<br>
+A <tt>PRIMARY KEY</tt> is a <tt>UNIQUE KEY</tt>; a <tt>UNIQUE KEY</tt> is an <tt>INDEX</tt>.  (<tt>KEY</tt> == <tt>INDEX</tt>.)
+<br>
+<br>
+InnoDB <b>clusters</b> the PRIMARY KEY with the data.
+Hence, given the value of the PK ("PRIMARY KEY"), after drilling down the BTree to find the index entry, you have
+all the columns of the row when you get there.
+A "secondary key" (any UNIQUE or INDEX other than the PK) in InnoDB first drills down the BTree
+for the secondary index, where it finds a copy of the PK
+Then it drills down the PK to find the row.
+<br>
+<br>
+Every InnoDB table has a <tt>PRIMARY KEY</tt>.  While there is a default if you do
+not specify one, it is best to explicitly provide a PK.
+<br>
+<br>
+For completeness:  MyISAM works differently.  All indexes (including the PK) are in separate BTrees.
+The leaf node of such BTrees have a pointer (usually a byte offset) into the data file.
+<br>
+<br>
+All discussion here assumes InnoDB tables, however most statements apply to other Engines.
+<br>
+<br>
+<a href=https://www.mysqltutorial.org/mysql-index/mysql-clustered-index/>A concise discussion of InnoDB's PK</a><br>
+<br>
+<a name=first_some_examples><h2>First, some examples</h2>
+<br>
+Think of a list of names, sorted by last_name, then first_name.
+You have undoubtedly seen such lists, and they often have other information such as address and phone number.
+Suppose you wanted to look me up.
+If you remember my full name ('James' and 'Rick'), it is easy to find my entry.
+If you remembered only my last name ('James') and first initial ('R').
+You would quickly zoom in on the Jameses and find the Rs in them.  There, you might remember 'Rick' and ignore 'Ronald'.
+But, suppose you remembered my first name ('Rick') and only my last initial ('J').
+Now you are in trouble.  You would be scanning all the Js -- Jones, Rick; Johnson, Rick; Jamison, Rick; etc, etc.
+That's much less efficient.
+<br>
+<br>
+Those equate to
+<pre>
+    INDEX(last_name, first_name) -- the order of the list.
+    WHERE last_name = 'James' AND first_name = 'Rick'  -- best case
+    WHERE last_name = 'James' AND first_name LIKE 'R%' -- pretty good
+    WHERE last_name LIKE 'J%' AND first_name = 'Rick'  -- pretty bad
+</pre>
+<br>
+Think about this example as I talk about "=" ('equality predicate') versus "range" in the Algorithm, below.
+<br>
+<br>
+<a name=algorithm_step_1_where_column_const_><h2>Algorithm, Step 1 (WHERE "column = const")</h2>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 AND ...</tt> : an INDEX starting with aaa is good.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 AND bbb = 456 AND ...</tt> : an INDEX starting with aaa and bbb is good.  In this case, it does not matter whether aaa or bbb comes first in the INDEX.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>xxx IS NULL</tt> : this acts like "= const" for this discussion.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE t1.aa = 123 AND t2.bb = 456</tt> -- You must only consider columns in the current table.
+<br>
+<br>
+Note that the expression must be of the form of <tt>column_name</tt> = (constant).
+The following do not work for step 1:
+<tt>DATE(dt) = '...'</tt>, <tt>LOWER(s) = '...'</tt>, <tt>CAST(s ...) = '...'</tt>, <tt>x='...' COLLATE...</tt>  --
+They "hide the column in a function call".  The index cannot be used.
+<br>
+<br>
+(If there are no "=" parts AND'd in the WHERE clause, move on to step 2 without any columns in your putative INDEX.)
+<br>
+<br>
+<a name=algorithm_step_2><h2>Algorithm, Step 2</h2>
+<br>
+Find the <i>first</i> of 2a / 2b / 2c that applies; use it; then quit.
+If none apply, then you are through gathering columns for the index.
+<br>
+<br>
+In some cases it is optimal to do step 1 (all equals) plus step 2c (<tt>ORDER BY</tt>).
+<br>
+<br>
+<a name=algorithm_step_2a_one_range_><h2>Algorithm, Step 2a (one range)</h2>
+<br>
+A "range" shows up as
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>aaa >= 123</tt> -- any of &lt;, &lt;=, >=, >; but not &lt;>, !=, IS NOT NULL
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>aaa BETWEEN 22 AND 44</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>sss LIKE 'blah%'</tt> -- but not <tt>sss LIKE '%blah'</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>xxx IS NOT NULL</tt>
+<br>
+Add the column in the range to your putative INDEX.
+<br>
+<br>
+If there are more parts to the WHERE clause, you must stop now.
+<br>
+<br>
+Complete examples (assume nothing else comes after the snippet)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa >= 123 AND bbb = 1</tt> &nbsp; &rArr; <tt>INDEX(bbb, aaa)</tt> (WHERE order does not matter; INDEX order does)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa >= 123</tt> &nbsp; &rArr; <tt>INDEX(aaa)</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa >= 123 AND ccc > 'xyz'</tt> &nbsp; &rArr; <tt>INDEX(aaa)</tt> <i>or</i> <tt>INDEX(ccc)</tt> (only one range) (See ICP, below)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa >= 123 ORDER BY aaa</tt> &nbsp; &rArr; <tt>INDEX(aaa)</tt> -- Bonus:  The ORDER BY will use the INDEX.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa >= 123 ORDER BY aaa</tt> &nbsp; &rArr; <tt>INDEX(aaa) DESC</tt> -- Same Bonus.
+<br>
+<br>
+(There are some cases where multiple ranges on a single column will work.)
+<br>
+<br>
+<a name=algorithm_step_2b_group_by_><h2>Algorithm, Step 2b (GROUP BY)</h2>
+<br>
+If there is a GROUP BY, all the columns of the GROUP BY should now be added, in the specified order, to the INDEX you are building.
+(I do not know what happens if one of the columns is already in the INDEX.)
+<br>
+<br>
+If you are GROUPing BY an expression (including function calls), you cannot use the GROUP BY; stop.
+<br>
+<br>
+Complete examples (assume nothing else comes after the snippet)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 AND bbb = 1 GROUP BY ccc</tt> &nbsp; &rArr; <tt>INDEX(bbb, aaa, ccc)</tt> <i>or</i> <tt>INDEX(aaa, bbb, ccc)</tt> (='s first, in any order; then the GROUP BY)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa >= 123 GROUP BY xxx</tt> &nbsp; &rArr; <tt>INDEX(aaa)</tt> (You should have stopped with Step 2a)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>GROUP BY x,y</tt> &nbsp; &rArr; <tt>INDEX(x,y)</tt> (if there is no WHERE)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 GROUP BY xxx,(a+b)</tt> &nbsp; &rArr; <tt>INDEX(aaa)</tt> -- expression in GROUP BY, so no use including even xxx.
+<br>
+<br>
+If the <tt>GROUP BY</tt> and <tt>ORDER BY</tt> have (or could have) the same columns <i>in the same order</i>; adjust them to 'match'.  That way, both <tt>GROUP BY</tt> and <tt>ORDER BY</tt> can be done at the same time.  This is likely to obviate an extra sort.
+<br>
+<br>
+<a name=algorithm_step_2c_order_by_><h2>Algorithm, Step 2c (ORDER BY)</h2>
+<br>
+If there is a ORDER BY, all the columns of the ORDER BY should now be added, in the specified order, to the INDEX you are building.
+<br>
+<br>
+If there are multiple columns in the <tt>ORDER BY</tt>, and there is a mixture of ASC and DESC, do not add the ORDER BY columns; they won't help; stop.
+(There is an exception in version 8.0 -- If you declare the index with a mixture of ASC and DESC, the matching <tt>ORDER BY</tt> can use the index.)
+<br>
+<br>
+If it does not matter to the results, change all to ASC or DESC.
+<br>
+<br>
+If you are ORDERing BY an expression (including function calls), you cannot use the ORDER BY; stop.
+<br>
+<br>
+Complete examples (assume nothing else comes after the snippet)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 GROUP BY ccc ORDER BY ddd</tt> &nbsp; &rArr; <tt>INDEX(aaa, ccc)</tt> -- should have stopped with Step 2b
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 GROUP BY ccc ORDER BY ccc</tt> &nbsp; &rArr; <tt>INDEX(aaa, ccc)</tt> -- the ccc will be used for both GROUP BY and ORDER BY
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 ORDER BY xxx ASC, yyy DESC</tt> &nbsp; &rArr; <tt>INDEX(aaa)</tt> -- mixture of ASC and DESC.
+<br>
+<br>
+The following are especially good.
+Normally a LIMIT cannot be applied until after lots of rows are gathered and then sorted according to the ORDER BY.
+But, if the INDEX gets all they way through the ORDER BY, only (OFFSET + LIMIT) rows need to be gathered.
+So, in these cases, you win the lottery with your new index:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 GROUP BY ccc ORDER BY ccc LIMIT 10</tt> &nbsp; &rArr; <tt>INDEX(aaa, ccc)</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE aaa = 123 ORDER BY ccc LIMIT 10</tt> &nbsp; &rArr; <tt>INDEX(aaa, ccc)</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>ORDER BY ccc LIMIT 10</tt> &nbsp; &rArr; <tt>INDEX(ccc)</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE ccc > 432 ORDER BY ccc LIMIT 10</tt> &nbsp; &rArr; <tt>INDEX(ccc)</tt> -- This "range" is compatible with ORDER BY
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE ccc < 432 ORDER BY ccc LIMIT 10</tt> &nbsp; &rArr; <tt>INDEX(ccc)</tt> -- also works
+<br>
+<br>
+(It does not make much sense to have a LIMIT without an ORDER BY, so I do not discuss that case.)
+<br>
+<br>
+<a name=algorithm_end><h2>Algorithm end</h2>
+<br>
+You have collected a few columns; put them in an <tt>INDEX</tt> and <tt>ADD</tt> that to the table.
+That will often produce a "good" index for the SELECT you have.
+Below are some other suggestions that <i>may</i> be relevant.
+<br>
+<br>
+An example of the Algorithm being 'wrong':
+<pre>
+    SELECT ... FROM t WHERE flag = true;
+</pre>
+This would (according to the Algorithm) call for <tt>INDEX(flag)</tt>.
+However, indexing a column that has two (or a small number of) different values is almost always useless.  This is called 'low cardinality'.
+The Optimizer would prefer to do a table scan than to bounce between the index BTree and the data.
+<br>
+<br>
+On the other hand, the Algorithm is 'right' with
+<pre>
+    SELECT ... FROM t WHERE flag = true AND date >= '2015-01-01';
+</pre>
+That would call for a composite (compound) index <i>starting with</i> a flag: <tt>INDEX(flag, date)</tt>.
+Such an index is likely to be very beneficial.
+And it is likely to be more beneficial than <tt>INDEX(date)</tt>.
+<br>
+<br>
+Even more striking is with a LIMIT:
+<pre>
+    SELECT ... FROM t WHERE flag = true AND date >= '2015-01-01' LIMIT 10;
+</pre>
+<tt>INDEX(flag, date)</tt> would be able to stop after 10 rows; <tt>INDEX(date)</tt> would not.
+<br>
+<br>
+If your resulting INDEX includes column(s) that are likely to be UPDATEd, note that
+the UPDATE will have extra work to remove a 'row' from one place in the INDEX's BTree
+and insert a 'row' back into the BTree.  For example:
+<pre>
+INDEX(x)
+UPDATE t SET x = ... WHERE ...;
+</pre>
+There are too many variables to say whether it is better to keep the index or to toss it.
+<br>
+<br>
+<a name=limitations><h2>Limitations</h2>
+<br>
+(There are exceptions to some of these.)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;In 5.6 / 10.0, you may not include a column that equates to bigger than 767 bytes: <tt>VARCHAR(255) CHARACTER SET utf8</tt> or <tt>VARCHAR(191) CHARACTER SET utf8mb4</tt>.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;In 5.7 / 10.2, you may not include a column that equates to bigger than 3072 bytes.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;You can deal with big fields using "prefix" indexing; but see below.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;You should not have more than 5 columns in an index.  (This is just a Rule of Thumb; up to 16 is allowed.)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;You should not have redundant indexes.  (See below.)
+<br>
+<br>
+<a href=limits#767_limit_in_innodb_indexes>Workarounds for 767 problem</a><br>
+<br>
+<a name=stop_after_equality_test><h2>Stop after equality test</h2>
+<br>
+Technically, it is more complex than testing for '=':  The relevant part from the documentation: "The optimizer attempts to use additional key parts to determine the interval as long as the comparison operator is =, <=>, or IS NULL. If the operator is >, <, >=, <=, !=, <>, BETWEEN, or LIKE, the optimizer uses it but considers no more key parts."  See
+<a href=https://dev.mysql.com/doc/refman/8.0/en/range-optimization.html#range-access-multi-part>Range Optimization</a><br>
+<br>
+<a name=flags_and_low_cardinality><h2>Flags and Low Cardinality</h2>
+<br>
+<tt>INDEX(flag)</tt> is almost never useful if <tt>flag</tt> has very few values.
+More specifically, when you say <tt>WHERE flag = 1</tt> and "1" occurs more than
+20% of the time, such an index will be shunned.  The Optimizer would prefer
+to scan the table instead of bouncing back and forth between the index and the data for more than 20% of the rows.
+<br>
+<br>
+("20%" is really somewhere between 10% and 30%, depending on the phase of the moon.)
+<br>
+<br>
+<a href=https://stackoverflow.com/questions/51316465/mysql-index-parameters-and-limits>Example of 20% cutoff</a><br>
+<br>
+When you have a composite index that could be in any order, the cardinality of the individual columns does <i>not</i> matter in picking the order.  The cardinality of the entire index is what matters.
+<br>
+<br>
+Discussions about Cardinality:
+<a href=https://stackoverflow.com/questions/50239658/should-i-put-the-higher-cardinality-column-first-in-an-index-when-involving-a-ra>Cardinality & Range</a><br>
+<a href=https://stackoverflow.com/questions/12315496/which-column-to-put-first-in-index-higher-or-lower-cardinality>Cardinality & composite</a><br>
+<a href=https://stackoverflow.com/questions/2113181/does-it-make-sense-to-use-an-index-that-will-have-a-low-cardinality>Single-column index</a><br>
+<a href=https://stackoverflow.com/a/50240079/1766831>Equality before range, with 'proof'</a><br>
+<br>
+<a name=_covering_indexes><h2>"Covering" Indexes</h2>
+<br>
+A <b>covering</b> index is an index that contains <i>all</i> the columns in the SELECT.
+It is special in that the SELECT can be completed by looking only at the INDEX BTree.
+(Since InnoDB's PRIMARY KEY is clustered with the data, "covering" is of no benefit when considering at the PRIMARY KEY.)
+<br>
+<br>
+Mini-cookbook:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;1.&nbsp;&nbsp;Gather the list of column(s) according to the "Algorithm", above.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;2.&nbsp;&nbsp;Add to the <i>end</i> of the list the rest of the columns seen in the SELECT, in any order.
+<br>
+<br>
+Examples:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>SELECT x FROM tbl WHERE y = 5;</tt> &nbsp; &rArr; <tt>INDEX(y,x)</tt> -- The algorithm said just <tt>INDEX(y)</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>SELECT x,z FROM tbl WHERE y = 5 AND q = 7;</tt> &nbsp; &rArr; <tt>INDEX(y,q,x,z)</tt> -- y and q in either order (Algorithm), then x and z in either order (covering).
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>SELECT x FROM tbl WHERE y > 5 AND q > 7;</tt> &nbsp; &rArr; <tt>INDEX(y,q,x)</tt> -- y or q first (that's as far as the Algorithm goes), then the other two fields afterwards.
+<br>
+<br>
+The speedup you get might be minor, or it might be spectacular; it is hard to predict.
+<br>
+<br>
+But...
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;It is not wise to build an index with lots of columns.  Let's cut it off at 5 (Rule of Thumb).
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Prefix indexes cannot 'cover', so don't use them anywhere in a 'covering' index.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;There are limits (3KB?) on how 'wide' an index can be, so "covering" may not be possible.
+<br>
+<br>
+InnoDB includes the PK columns' values in each secondary key's BTree so that it can locate the entire row in the data's BTree.  The PK columns are tacked on the end of the secondary key, but (I am pretty sure) they are not unnecessarily duplicated.  (MyISAM does not do this; instead, it uses a pointer into the .MYD file.)
+<br>
+<br>
+<a href=https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_covering_index>Ref manual definition</a><br>
+<a href=https://dba.stackexchange.com/a/253018/1876>More on Covering</a><br>
+<br>
+<a name=redundant_excessive_indexes><h2>Redundant/Excessive Indexes</h2>
+<br>
+<tt>INDEX(a,b)</tt> can find anything that <tt>INDEX(a)</tt> could find.  So you don't need both.  Get rid of the shorter one.  There are even cases where the Optimizer will pick the 'shorter' index, thereby leading to poorer performance.
+<br>
+<br>
+If you have lots of SELECTs and they generate lots of INDEXes, this may cause a different problem.
+Each index must be updated (sooner or later) for each INSERT.  More indexes &nbsp; &rArr; slower INSERTs.
+Limit the number of indexes on a table to about 6 (Rule of Thumb).
+<br>
+<br>
+Notice in this cookbook how it says "in any order" in a few places.
+If, for example, you have both of these (in different SELECTs):
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE a=1 AND b=2</tt> begs for either INDEX(a,b) <i>or</i> INDEX(b,a)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE a>1 AND b=2</tt> begs <i>only for</i> INDEX(b,a)
+<br>
+Include only INDEX(b,a) since it handles both cases with only one INDEX.
+<br>
+<br>
+Suppose you have a lot of indexes, including (a,b,c,dd) and (a,b,c,ee).
+Those are getting rather long.  Consider either picking one of them, or having simply (a,b,c).
+Sometimes the selectivity of (a,b,c) is so good that tacking on 'dd' or 'ee' does make enough difference to matter.
+<br>
+<br>
+<a name=optimizer_picks_order_by><h2>Optimizer picks ORDER BY</h2>
+<br>
+The main cookbook skips over an important optimization that is <i>sometimes</i> used.
+The optimizer will sometimes ignore the WHERE and, instead, use an INDEX that matches the ORDER BY.
+This, of course, needs to be a perfect match -- all columns, in the same order.  And ASC/DESC caveats handled.
+<br>
+<br>
+This becomes especially beneficial if there is a LIMIT.
+<br>
+<br>
+But there is a problem.  There could be two situations, and the Optimizer is sometimes not smart enough to see which INDEX would be better:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;If the WHERE does very little filtering, fetching the rows in ORDER BY order avoids a sort and has little wasted effort (because of 'little filtering').  Using the INDEX matching the ORDER BY is better in this case.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;If the WHERE does a lot of filtering, the ORDER BY is wasting a lot of time fetching rows only to filter them out.  Using an INDEX matching the WHERE clause is better.
+<br>
+<br>
+What should you do?  If you think the "little filtering" is likely, then create an index with the ORDER BY columns in order
+and hope that the Optimizer uses it when it should.
+<br>
+<br>
+<a name=or><h2>OR</h2>
+<br>
+Cases...
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE a=1 OR a=2</tt> -- This is turned into <tt>WHERE a IN (1,2)</tt> and optimized that way.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE a=1 OR b=2</tt> usually cannot be optimized.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE x.a=1 OR y.b=2</tt> This is even worse because of using two different tables.
+<br>
+<br>
+A workaround is to use UNION.  Each part of the UNION is optimized separately.  For the second case:
+<pre>
+   ( SELECT ... WHERE a=1 )   -- and have INDEX(a)
+   UNION DISTINCT -- "DISTINCT" is assuming you need to get rid of dups
+   ( SELECT ... WHERE b=2 )   -- and have INDEX(b)
+   GROUP BY ... ORDER BY ...  -- whatever you had at the end of the original query
+</pre>
+Now the query can take good advantage of two different indexes.
+Note: "Index merge" might kick in on the original query,
+but it is not necessarily any faster than the UNION.
+<a href=index1>Sister blog on compound indexes, including 'Index Merge'</a><br>
+<br>
+The third case (OR across 2 tables) is similar to the second.
+<br>
+<br>
+If you originally had a LIMIT, UNION gets complicated.
+If you started with <tt>ORDER BY z LIMIT 190, 10</tt>, then the UNION needs to be
+<pre>
+   ( SELECT ... ORDER BY ... LIMIT 200 )   -- effectively OFFSET 0, LIMIT 190+10
+   UNION DISTINCT -- (or ALL)
+   ( SELECT ... ORDER BY ... LIMIT 200 )
+   ORDER BY ...
+   LIMIT 190, 10              -- Same as originally
+</pre>
+<br>
+In old versions of MySQL, UNION always created a temp table.
+Newer versions (MySQL 5.7.3 / MariaDB 10.1) can avoid the temp table in selected situations of UNION ALL.
+<br>
+<br>
+<a href=https://stackoverflow.com/questions/52043444/query-takes-too-long-to-query-with-or-clause-but-their-parts-are-very-quick>stackoverflow Example of OR to UNION</a><br>
+<br>
+<a href=https://dba.stackexchange.com/questions/267658/mysql-php-select-distinct-column-based-on-another-column-with-order-and-limit>An example</a><br>
+<br>
+<a href=https://dba.stackexchange.com/a/189957/1876>Another discussion of UNION+LIMIT</a><br>
+<br>
+<a name=text_blob><h2>TEXT / BLOB</h2>
+<br>
+You cannot directly index a TEXT or BLOB or large VARCHAR or large BINARY column.
+However, you can use a "prefix" index:  <tt>INDEX(foo(20))</tt>.
+This says to index the first 20 characters of <tt>foo</tt>.
+But... It is rarely useful.
+<br>
+<br>
+Examples of a prefix index:
+<pre>
+    INDEX(last_name(2), first_name)
+</pre>
+The index for me would contain 'Ja', 'Rick'.  That's not useful for distinguishing between
+'Jamison', 'Jackson', 'James', etc.
+<br>
+<br>
+You should probably never do <tt>UNIQUE(foo(20))</tt> because this applies a uniqueness constraint on the first 20 characters of the column,
+not the whole column!
+<br>
+<br>
+<a href=https://dev.mysql.com/doc/refman/5.7/en/create-index.html>More on prefix indexing</a><br>
+<br>
+<a name=dates><h2>DATEs</h2>
+<br>
+DATE, DATETIME, etc. are tricky to compare against.
+<br>
+<br>
+Some tempting, but inefficient, techniques:
+<pre>
+    date_col LIKE '2016-01%'      -- must convert date_col to a string, so acts like a function
+    LEFT(date_col, 7) = '2016-01' -- hiding the column in function
+    DATE(date_col) = 2016         -- hiding the column in function
+</pre>
+All must do a full scan.
+(On the other hand, it can handy to use GROUP BY LEFT(date_col, 7) for monthly grouping, but that is not an INDEX issue.)
+<br>
+<br>
+This is efficient, and can use an index:
+<pre>
+        date_col >= '2016-01-01'
+    AND date_col  < '2016-01-01' + INTERVAL 3 MONTH
+</pre>
+This case works because both right-hand values are converted to constants, then it is a "range".
+I like the design pattern with INTERVAL because it avoids computing the last day of the month.
+And it avoids tacking on '23:59:59', which is wrong if you have microsecond times.
+(And other cases.)
+<br>
+<br>
+Hiding in a function call is called not "sargable":
+<a href=https://en.wikipedia.org/wiki/Sargable>Wikipedia on Sargable</a><br>
+<br>
+<a name=explain_key_len><h2>EXPLAIN Key_len</h2>
+<br>
+Perform <tt>EXPLAIN SELECT...</tt> (and <tt>EXPLAIN FORMAT=JSON SELECT...</tt> if you have 5.6.5).
+Look at the Key that it chose, and the <tt>Key_len</tt>.  From those you can deduce how many columns of the index
+are being used for filtering.  (JSON makes it easier to get the answer.)
+From that you can decide whether it is using as much of the INDEX as you thought.
+Caveat:  Key_len only covers the WHERE part of the action; the non-JSON output won't easily say whether GROUP BY or ORDER BY was handled by the index.
+<br>
+<br>
+Tip:  If the index has just an <tt>INT</tt> and <tt>Key_len</tt> says 5, that means the extra byte implies that it was <tt>NULL</tt>.  Perhaps it should have been <tt>NOT NULL</tt>?
+<br>
+<br>
+<a name=in><h2>IN</h2>
+<br>
+<tt>IN (1,99,3)</tt> is sometimes optimized as efficiently as "=", but not always.
+Older versions of MySQL did not optimize it as well as newer versions.  (5.6 is possibly the main turning point.)
+<br>
+<br>
+<a name=in_select_><h2>IN ( SELECT ... )</h2>
+<br>
+From version 4.1 through 5.5, <tt>IN ( SELECT ... )</tt> was very poorly optimized.
+The SELECT was effectively re-evaluated every time.
+Often it can be transformed into a JOIN, which works much faster.
+Heres is a pattern to follow:
+<pre>
+SELECT  ...
+    FROM  a
+    WHERE  test_a
+      AND  x IN (
+        SELECT  x
+            FROM  b
+            WHERE  test_b
+                );
+&rArr;
+SELECT  ...
+    FROM  a
+    JOIN  b USING(x)
+    WHERE  test_a
+      AND  test_b;
+</pre>
+The SELECT expressions will need "a." prefixing the column names.
+<br>
+<br>
+Alas, there are cases where the pattern is hard to follow.
+<br>
+<br>
+5.6 does some optimizing, but probably not as good as the JOIN.
+<br>
+<br>
+If there is a JOIN or GROUP BY or ORDER BY LIMIT in the subquery, that complicates the JOIN in new format.
+So, it <i>might</i> be better to use this pattern:
+<pre>
+SELECT  ...
+    FROM  a
+    WHERE  test_a
+      AND  x IN ( SELECT  x  FROM ... );
+&rArr;
+SELECT  ...
+    FROM  a
+    JOIN        ( SELECT  x  FROM ... ) b
+        USING(x)
+    WHERE  test_a;
+</pre>
+Caveat:  If you end up with two subqueries JOINed together, note that neither has any indexes, hence performance
+can be very bad.  (5.6 improves on it by dynamically creating indexes for subqueries.)
+<br>
+<br>
+MariaDB and Oracle 5.7 have improved in relation to "NOT IN", "NOT EXISTS", and "LEFT JOIN..IS NULL";
+here is an
+<a href=https://explainextended.com/2009/09/18/not-in-vs-not-exists-vs-left-join-is-null-mysql/>old discussion on the topic</a><br>
+So, what I say there may not be the final word.
+<br>
+<br>
+Further optimizations involve turning <tt>IN</tt> into <tt>EXISTS</tt> or vice versa.  So, <tt>IN ( SELECT ... )</tt> used to be terrible; now it is "maybe".
+<br>
+<br>
+<a name=index_condition_pushdown_icp_><h2>Index Condition Pushdown (ICP)</h2>
+<br>
+In EXPLAINs, it will be indicated by "Using index condition".  <i>Note:  This is different than just "Using index".</i>
+<br>
+<br>
+MySQL has two layers of code -- the "Handler" that handles engine-independent operations, and the Engine layer.  Originally, most optimization code was in the Handler layer.  That included WHERE tests that were not optimized out by an INDEX.  This implied that the Engine layer had to return rows to the Handler layer, only to have it someties toss them.  Beginning with MySQL 5.6, InnoDB took on that task.  This made <i>some</i> queries a little faster.  (I doubt if a query is made more than twice as fast via ICP.)
+<br>
+<br>
+An example is a WHERE with 2 ranges.
+<br>
+<pre>
+   WHERE latitude  BETWEEN ... AND ...
+     AND longitude BETWEEN ... AND ...
+
+   INDEX(latitude)
+   INDEX(latitude, longitude)
+</pre>
+<br>
+Each index can filter only on latitude.  However the test for longitude is handled differently depending on ICP.  Without ICP (eg, the first index), the rows would be bounced up to the Handler for secondary filtering on longitude.  With ICP (the composite index), InnoDB can do that extra test enough faster to make it worth doing.
+<br>
+<br>
+If you declare both indexes, the Optimizer seems to pick the 1-column index, thereby failing to get the ICP advantage, so it runs as slow as if ICP were turned off.  Bottom line:  For <i>this</i> example, have only the composite index.
+<br>
+<br>
+Actually you should also have these for the particular application, since the Optimizer will use statistics to pick between them, to good effect.)
+<br>
+<br>
+   INDEX(latitude, longitude)
+   INDEX(longitude, latitude)
+<br>
+<br>
+<a href=find_nearest_in_mysql>More discussion about Bounding boxes and "find nearest"</a><br>
+<br>
+<a name=explode_implode><h2>Explode/Implode</h2>
+<br>
+When you have a <tt>JOIN</tt> and a <tt>GROUP BY</tt>, you may have the situation where
+the JOIN exploded more rows than the original query (due to 1:many or many:many), but you wanted
+only one row from the original table, so you added the GROUP BY to implode back to
+the desired set of rows.
+<br>
+<br>
+This explode + implode, especially because of the large temp table, is costly.
+It would be better to avoid them if possible.
+<br>
+<br>
+<i>Sometimes</i> the following will work.
+<br>
+<br>
+Using GROUP_CONCAT to isolate the explosion:
+<pre>
+SELECT  a.*,
+        b.y
+    FROM a
+    JOIN b USING(x)
+    GROUP BY a.id
+&rArr;
+SELECT  a.*,
+        ( SELECT GROUP_CONCAT(b.y) FROM b WHERE b.x = a.x ) AS ys
+    FROM a
+</pre>
+<br>
+First find the ids, then do the rest.  This avoids the GROUP BY.
+<br>
+<br>
+<a href=https://dba.stackexchange.com/questions/115059/mysql-query-causing-high-cpu-and-taking-forever-to-execute/115120#115120>Another variant</a><br>
+<br>
+<a name=many_to_many_mapping_table><h2>Many-to-Many Mapping table</h2>
+<br>
+Do it this way.
+<br>
+<pre>
+    CREATE TABLE XtoY (
+        # No surrogate id for this table
+        x_id MEDIUMINT UNSIGNED NOT NULL,   -- For JOINing to one table
+        y_id MEDIUMINT UNSIGNED NOT NULL,   -- For JOINing to the other table
+        # Include other fields specific to the 'relation'
+        PRIMARY KEY(x_id, y_id),            -- When starting with X
+        INDEX      (y_id, x_id)             -- When starting with Y
+    ) ENGINE=InnoDB;
+</pre>
+<br>
+Notes:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Do not have an <tt>AUTO_INCREMENT</tt> id for this table -- The PK given is the 'natural' PK; there is no good reason for a surrogate.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>MEDIUMINT</tt> -- This is a reminder that all INTs should be made as small as is safe (smaller &rArr; faster).  Of course the declaration here must match the definition in the table being linked to.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>UNSIGNED</tt> -- Nearly all INTs may as well be declared non-negative
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>NOT NULL</tt> -- Well, that's true, isn't it?
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>InnoDB</tt> -- More effecient than MyISAM because of the way the PRIMARY KEY is clustered with the data in InnoDB.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>INDEX(y_id, x_id)</tt> -- The PRIMARY KEY makes it efficient to go one direction; this index makes the other direction efficient.  No need to say UNIQUE; that would be extra effort on INSERTs.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;In the secondary index, saying just <tt>INDEX(y_id)</tt> would work because it would implicit include <tt>x_id</tt>.  But I would rather make it more obvious that I am hoping for a 'covering' index.  (Prior to 5.6.9, you need to include both ids to get the performance.  cf use_index_extensions.)
+<br>
+<br>
+To conditionally INSERT new links, use
+<a href=https://dev.mysql.com/doc/refman/5.7/en/insert-on-duplicate.html>IODKU</a><br>
+<br>
+Note that if you had an AUTO_INCREMENT in this table, IODKU would "burn" ids quite rapidly.
+<br>
+<br>
+<a href=https://stackoverflow.com/a/58215634/1766831>Another discussion of many:many</a><br>
+<a href=https://stackoverflow.com/questions/3045034/whats-the-correct-name-for-an-association-table-a-many-to-many-relationship>About 20 names for this type of table</a><br>
+Associative Entity, Association table, Bridge table, Cross-reference table, Crosswalk, Intermediary table, Intersection table, Join table, Junction table, Link table, Linking table, Many-to-many resolver, Map table, Mapping table, Pairing table, Relationship table, Transition table
+<br>
+<br>
+If one of the two tables is just an id and string, consider getting rid of that table.  In which case, the many:many table can be simplified; see
+<a href=https://dba.stackexchange.com/a/270000/1876>Simplified entity</a><br>
+<a href=https://stackoverflow.com/a/62719123/1766831>Philosophy of many:many</a><br>
+"This solution improved my postmeta query time from 32 seconds to 4.9 seconds. – osemec" -- see
+<a href=https://stackoverflow.com/a/43859442/1766831>Why are references to wp_postmeta so slow?</a><br>
+<a href=https://stackoverflow.com/a/76156771/1766831>A simple example of the mapping table</a><br>
+<a href=https://stackoverflow.com/a/23165675/1766831>Posts and categories (example)</a><br>
+<a href=https://wordpress.org/plugins/index-wp-mysql-for-speed/>WordPress Plugin to improve wp_postmeta's indexes</a><br>
+<a href=https://stackoverflow.com/a/76168653/1766831>Some patterns</a><br>
+<a href=https://stackoverflow.com/a/76526830/1766831>Example of converting to new schema</a><br>
+<br>
+<a name=other_primary_key_patterns><h2>Other Primary Key patterns</h2>
+<br>
+Here are some common patterns. (assuming id is AUTO_INCREMENT`)
+<br>
+<br>
+A uuid is very random, hence this may be optimal:
+<br>
+<pre>
+   PRIMARY KEY (id),
+   UNIQUE(uuid)
+</pre>
+<br>
+Sometimes the artificial id is beneficial, but this can let you use the PK for "locality of reference":
+<br>
+<pre>
+   PRIMARY KEY(user_id, id),  -- cluster together all the users stuff
+   INDEX(id)    -- sufficient to heep AUTO_INCREMENT happy
+</pre>
+<br>
+<a href=https://stackoverflow.com/questions/76160770/points-to-consider-while-designating-a-unique-column-as-a-primary-key-in-a-table>UNIQUE vs PRIMARY</a><br>
+<br>
+<a name=subqueries_and_unions><h2>Subqueries and UNIONs</h2>
+<br>
+Each subquery SELECT and each SELECT in a UNION can be considered separately for finding the optimal INDEX.
+<br>
+<br>
+Exception:  In a "correlated" ("dependent") subquery, the part of the WHERE that depends on the outside table
+is not easily factored into the INDEX generation.  (Cop out!)
+<br>
+<br>
+<a name=joins><h2>JOINs</h2>
+<br>
+Everything in this section should be qualified with "usually".  There are many exceptions; I will cover the common things.
+<br>
+<br>
+<b><tt>WHERE</tt> versus <tt>ON</tt></b>
+<br>
+<br>
+Use <tt>ON</tt> for saying how the tables are "related".  Use <tt>WHERE</tt> for "filtering", by specifying which rows to keep.
+For human consumption, please put the conditions in <tt>WHERE</tt> or <tt>ON</tt> according to that rule.
+<br>
+<br>
+The Optimizer sees clauses in <tt>WHERE</tt> and <tt>ON</tt> as equivalent except in the case of <tt>LEFT JOIN</tt>.
+<br>
+<br>
+<b>Nested Loop Join</b>
+<br>
+<br>
+The Optimizer almost always looks through one table first.  Then, for each row that might be used in the 'first' table, it looks up the matching row in the 'next' table.  And so on for each other table.  This is called "NLJ" or "Nested Loop Join".
+<br>
+<br>
+In rare cases it will do an "Index merge".  This is where it scans two tables, fetching the Primary keys, then ANDs or ORs them to decide which rows to actually fetch.
+<br>
+<br>
+Another rare case involves fetching an entire table into an in-RAM has.  In some cases, this runs faster; in some case it runs slower; it is hard to predict.  It is mostly controlled by the setting <tt>join_buffer_size</tt>, which should not be set bigger than 1% of RAM.
+<br>
+<br>
+<b>The 'first' table</b>
+<br>
+<br>
+The Optimizer is free to rearrange the order of tables as long as it will get the same resultset.  You can force an order via <tt>STRAIGHT_JOIN</tt>, but this should be left as a last resort.
+<br>
+<br>
+Novices (and some 3rd party packages) blindly use <tt>LEFT JOIN</tt> even when <tt>JOIN</tt> (aka <tt>INNER JOIN</tt>) is intended.  The Optimizer usually recognizes when <tt>LEFT</tt> is improper and turns it into a plain <tt>JOIN</tt>.  It is better for anyone reading the query to be told the intent.
+<br>
+<br>
+Some Rules of Thumb on how the tables will be ordered:
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>STRAIGHT_JOIN</tt> forces the order.  (Try not to use this -- for the same reasons that I argue against <tt>FORCE INDEX</tt>.)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;A table or derived table that obviously delivers one row will be first.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Table(s) being filtered by a <tt>WHERE</tt> will come before this not being filtered.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;A "derived" table may be performed early.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The 'righthand' table of a true <tt>LEFT JOIN</tt> must come later then the lefthand table.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;When two tables are joined, but neither is being filtered (<tt>WHERE</tt>), the smaller one will be used first.
+<br>
+<br>
+But this blog is about Indexing!  Well, the optimal index for the 'first' table needs to <i>start</i> with the column(s) in the <tt>WHERE</tt> clause for that table.  The optimal index for the non-first tables should start a combination of the column(s) mentioned in both the <tt>ON</tt> and the <tt>WHERE</tt>.
+<br>
+<br>
+There are cases where you cannot predict which table with be 'first', so it is best to provide two optimal indexes -- for being 'first' or not 'first'.
+<br>
+<br>
+If the query has <tt>ORDER BY</tt>, then those columns <i>may</i> be used by the index for the the 'first' table.  For <tt>GROUP BY</tt>, see "Explode/Implode".
+<br>
+<br>
+<b>"Derived" Table</b>
+<br>
+<br>
+A "derived table" is a subquery in <tt>FROM</tt> or <tt>JOIN</tt>.
+<br>
+<br>
+<b>Comma-join</b>
+<br>
+<br>
+<tt>FROM a, b WHERE a.x = b.x</tt> is the old syntax; it works, but please do not use it.
+<br>
+<br>
+<tt>FROM a JOIN b ON a.x = b.x</tt> is the new syntax; please use it.
+<br>
+<br>
+The first step is to decide what order the optimizer will go through the tables.
+If you cannot figure it out, then you may need to be pessimistic and create
+two indexes for each table -- one assuming the first table will be used first,
+one assiming that it will come later in the table order.
+<br>
+<br>
+The optimizer <i>usually</i> starts with one table and extracts the data needed from it.
+As it finds a useful (that is, matches the WHERE clause, if any) row, it reaches into the 'next' table.
+This is called NLJ ("Nested Loop Join").
+The process of filtering and reaching to the next table continues through the rest of the tables.
+<br>
+<br>
+The optimizer <i>usually</i> picks the "first" table based on these hints:
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>STRAIGHT_JOIN</tt> forces the the table order.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The WHERE clause limits which rows needed (whether indexed or not).  That is, if you are filtering on one table, but not others, it will be used first.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The table to the "left" in a <tt>LEFT JOIN</tt> <i>usually</i> comes before the "right" table.  (By looking at the table definitions, the optimizer may decide that "LEFT" is irrelevant.)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The current INDEXes will encourage an order.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;etc.
+<br>
+<br>
+Running EXPLAIN tells you the table order that the Optimizer is very likely to use today.
+After adding a new INDEX, the optimizer may pick a different table order.
+You should anticipate the order changing, guess at what order makes the most sense, and build the INDEXes accordingly.
+Then rerun EXPLAIN to see if the Optimizer's brain was on the same wavelength you were on.
+<br>
+<br>
+You should build the INDEX for the "first" table based on any parts of the WHERE, GROUP BY, and ORDER BY
+clauses that are relevant to it.  If a GROUP/ORDER BY mentions a different table, you should ignore that clause.
+<br>
+<br>
+The second (and subsequent) table will be reached into based on the ON clause.
+(Instead of using commajoin, please write JOINs with the <tt>JOIN</tt> keyword and <tt>ON</tt> clause!)
+In addition, there could be parts of the WHERE clause that are relevant.
+GROUP/ORDER BY are not to be considered in writing the optimal INDEX for subsequent tables.
+<br>
+<br>
+<a href=https://stackoverflow.com/a/60049742/1766831>A JOIN example</a><br>
+<a href=https://stackoverflow.com/a/60198365/1766831>Several rules for creating INDEXes for JOINs</a><br>
+<br>
+<a name=derived_table><h2>Derived table</h2>
+<pre>
+   SELECT ...
+       FROM ( SELECT ... FROM a ... ) AS x
+       JOIN b ON ...
+</pre>
+The subquery on <tt>a</tt> is called a "derived table".  It will be computed first before considering the JOINed tables.  So, Provide the optimial index for <tt>a</tt>, then assume it is the "first" table in the JOIN.
+<br>
+<pre>
+   SELECT ...
+       FROM ( SELECT ... FROM a ... ) AS x
+       JOIN ( SELECT ... FROM b ... ) AS y  ON ...
+</pre>
+If one of those derived tables delivers a single row (and the Optimizer can figure that out) and it will be computed first.  But if both derived tables return multiple rows, there is a problem.  There are no indexes on them.  In older MySQL versions this led to repeated full table scans.  In newer versions, the Optimizer goes to the extra effort (and time) to figure out what the optimal index is for the temp table where it stored the results of the subquery, and makes an index on the fly.  In EXPLAIN you can see this via <tt>auto-key</tt>.
+<br>
+<br>
+If a derived table has a <tt>GROUP BY</tt> or <tt>LIMIT</tt>, then it may be worth having.
+<br>
+<br>
+If a derived table does not have a <tt>GROUP BY</tt> or <tt>LIMIT</tt>, it is usually worth trying to turn it into a JOIN at the outer level.
+<br>
+<br>
+<a name=partitioning><h2>PARTITIONing</h2>
+<br>
+PARTITIONing is rarely a substitute for a good INDEX.
+<br>
+<br>
+<tt>PARTITION BY RANGE</tt> is a technique that is <i>sometimes</i> useful when indexing fails to be good enough.
+In a two-dimensional situation such as nearness in a geographical sense, one dimension can partially be handled by
+partition pruning; then the other dimension can be handled by a regular index (preferrably the PRIMARY KEY).
+This goes into more detail:
+<a href=latlng>Find nearest 10 pizza parlors</a><br>
+<br>
+The optimal INDEXes for a partitioned table are different.  I elaborate here:
+<a href=partitionmaint>Partitioning</a><br>
+<br>
+<a name=fulltext><h2>FULLTEXT</h2>
+<br>
+FULLTEXT is now implemented in InnoDB as well as MyISAM.
+It provides a way to search for "words" in TEXT columns.
+This is <i>much</i> faster (when it is applicable) than <tt>col LIKE '%word%'</tt>.
+<br>
+<pre>
+    WHERE x = 1
+      AND MATCH (...) AGAINST (...)
+</pre>
+always(?) uses the FULLTEXT index first.  That is, the whole Algorithm is invalidated
+when one of the ANDs is <tt>MATCH..AGAINST</tt>.
+<br>
+<br>
+<tt>AGAINST('+mandatory +words' IN BOOLEAN MODE)</tt> -- for requiring word(s).
+<br>
+<br>
+<tt>AGAINST('+model T +Ford' IN BOOLEAN MODE)</tt> -- Don't put a <tt>+</tt> on a "word" that will be ignored due to shortness.
+<br>
+<pre>
+    WHERE MATCH (car) AGAINST ('+model T +Ford' IN BOOLEAN MODE)
+      AND car LIKE '%model T Ford%'
+</pre>
+to avoid "model A Ford", but still get good performance.  The FT search will come first and find both cars; then the <tt>LIKE</tt> need check only those few rows found.
+<br>
+<br>
+<a href=https://dev.mysql.com/doc/refman/5.7/en/optimizing-innodb-bulk-data-loading.html>A suggestion on FT's own id</a><br>
+<a href=https://www.slideshare.net/billkarwin/practical-full-text-search-with-my-sql>Comparison of Fulltext with alternatives</a><br>
+<br>
+<a name=search_multiple_columns_for_a_substring><h2>Search multiple columns for a substring</h2>
+<br>
+A common anti-pattern is to allow the user to specify a "string" and then search for it in all the likely columns:
+<pre>
+    WHERE company LIKE '%string%'
+       OR product LIKE '%string%'
+       OR id      LIKE '%string%' ...
+</pre>
+This requires reading all the rows and testing all the specified columns for "string".  Very slow.  I'll discuss some alternatives:
+<br>
+<br>
+Plan A:  Use <tt>FULLTEXT</tt>.
+<br>
+<pre>
+    FULLTEXT(company, product, id, ...)
+    and
+    MATCH(company, product, id, ...) AGAINST("+string" IN BOOLEAN MODE)
+</pre>
+provides a <i>much</i> faster way to do the search.  But it comes with some caveats:
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>FULLTEXT</tt> as some limitations (length, frequency, etc) on what "words" are allowed.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The <tt>+</tt> in front of each word says it is mandatory, but don't put it in front of a word that is too short.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;If there are other tests in the <tt>WHERE</tt>, they will be handled after isolating the rows that match.  (This is usually 'good'.)
+<br>
+<br>
+Plan B:  <tt>FULLTEXT</tt> on a combined column.
+<br>
+<br>
+Here, I suggest an extra column that contains all the words from all the columns the user might need to be searching.  Then have a single <tt>FULLTEXT</tt> index on that column.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Similar performance, etc, to Plan A.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Gives you a chance to "cleanse" the word list before blindly throwing it into the index.
+<br>
+<br>
+Plan C:  Plan B, but in a separate table.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The column (plus the PRIMARY KEY of the main table) might be the only columns in this table.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Not much advantage, except for constructing this "after the fact", when it could be quite costly to add a column and an FT index to your huge table.
+<br>
+<br>
+Plan D:  Hybrid between one of those plans, but extra tests.
+<br>
+<pre>
+    WHERE MATCH(...) AGAINST(...)
+      AND something else to further whittle down the number of rows.
+</pre>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;That AND might include a <tt>REGEXP</tt> test that could not effectively be handled by the word-oriented FT index.
+<br>
+<br>
+Plan E:  What about searching for something that is not a "word"?
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Searching for punctuation <i>may</i> be possible with suitable tuning of <tt>innodb_ft_*</tt> variables.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Punctuation <i>could</i> be avoided in Plan B by "cleansing" the data you put into the extra column.  For example:  punctuation could be removed and the "word" closed up.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Your app should look at the user's query, then decide whether to (a) build and execute a FULLTEXT query, or (b) build and execute an old, slow, string of LIKEs, or (c) disallow the search.
+<br>
+<br>
+<a name=signs_of_a_newbie><h2>Signs of a Newbie</h2>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;No "compound" (aka "composite") indexes
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;No <tt>PRIMARY KEY</tt>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Redundant indexes (especially blatant is <tt>PRIMARY KEY(id), KEY(id)</tt>)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Most or all columns individually indexes ("But I indexed everything")
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;"Commajoin" -- That is <tt>FROM a, b WHERE a.x=b.x</tt> instead of <tt>FROM a JOIN b ON a.x=b.x</tt>
+<br>
+<br>
+<a name=speeding_up_wp_postmeta><h2>Speeding up wp_postmeta</h2>
+<br>
+The schema changes mentioned here are automated in
+<a href=https://wordpress.org/plugins/index-wp-mysql-for-speed/>WordPress Plugin to improve wp_postmeta's indexes</a><br>
+<br>
+The published table (see Wikipedia) is
+<br>
+<pre>
+    CREATE TABLE wp_postmeta (
+      meta_id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+      post_id bigint(20) unsigned NOT NULL DEFAULT '0',
+      meta_key varchar(255) DEFAULT NULL,
+      meta_value longtext,
+      PRIMARY KEY (meta_id),
+      KEY post_id (post_id),
+      KEY meta_key (meta_key)
+    ) ENGINE=InnoDB  DEFAULT CHARSET=utf8;
+</pre>
+<br>
+<a href=https://edutechwiki.unige.ch/en/Wordpress_installation_and_configuration>Wikipedia - Wordpress schema</a><br>
+<br>
+The problems:
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The AUTO_INCREMENT provides no benefit; in fact it slows down most queries (because of having to look in secondary index to find auto_inc id, then looking in data for actual id you need)
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The AUTO_INCREMENT is extra clutter - both on disk and in cache.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Much better is PRIMARY KEY(post_id, meta_key) -- clustered, handles both parts that are usually in the WHERE.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;BIGINT is overkill, but that can't be fixed without changing other tables.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;VARCHAR(255) can be a problem in 5.6 with utf8mb4; see workarounds below.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;When would <tt>meta_key</tt> or <tt>meta_value</tt> ever be NULL?
+<br>
+<br>
+The solutions:
+<br>
+<pre>
+    CREATE TABLE wp_postmeta (
+        post_id BIGINT UNSIGNED NOT NULL,
+        meta_key VARCHAR(255) NOT NULL,
+        meta_value LONGTEXT NOT NULL,
+        PRIMARY KEY(post_id, meta_key),
+        INDEX(meta_key)
+        ) ENGINE=InnoDB;
+</pre>
+<br>
+The typical usage:
+<br>
+<pre>
+    JOIN wp_postmeta AS m  ON p.id = m.post_id
+    WHERE m.meta_key = '...'
+</pre>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The composite PRIMARY KEY goes straight to the desired row, no digression through secondary index, nor search through multiple rows.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;INDEX(meta_key) may or may not be useful, depending on what other queries you have.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;InnoDB is required for the 'clustering'.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Going forward, use utf8mb4, not utf8.  However, you should be consistent across all WP tables and in your connection parameters.
+<br>
+<br>
+The error "max key length is 767", which can happen in MySQL 5.5 and 5.6 when
+trying to use CHARACTER SET utf8mb4.
+Do one of the following (each has a drawback) to avoid the error:
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Upgrade to 5.7.7 for 3072 byte limit
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Change 255 to 191 on the VARCHAR -- you lose any values longer than 191 characters (but you may not have any);
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;ALTER .. CONVERT TO utf8 -- you lose Emoji and some of Chinese;
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Use a "prefix" index -- you lose some of the performance benefits;
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Reconfigure (if staying with 5.6.3 - 5.7.6) -- 4 things to change: Barracuda + innodb_file_per_table + innodb_large_prefix + dynamic or compressed.
+<br>
+<br>
+Note:  In later versions, these are deprecated (5.7 and 10.2?) because they are no longer necessary: <tt>innodb_file_format</tt>, <tt>innodb_file_format_check</tt>, <tt>innodb_file_format_max</tt> and <tt>innodb_large_prefix</tt>.  If you get an error to that effect, simply don't bother setting them.  They are actually removed in 8.0 / 10.4(?)
+<br>
+<br>
+Or...
+<br>
+<br>
+If you need the ability to have multiple meta keys with the same key name for one post, then use this solution.  It is nearly as good as the above suggestion.
+<br>
+<pre>
+    CREATE TABLE wp_postmeta (
+        meta_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        post_id BIGINT UNSIGNED NOT NULL,
+        meta_key VARCHAR(255) NOT NULL,
+        meta_value LONGTEXT NOT NULL,
+        PRIMARY KEY(post_id, meta_key, meta_id),  -- to allow dup meta_key for a post
+        INDEX(meta_id),    -- to keep AUTO_INCREMENT happy
+        INDEX(meta_key)
+        ) ENGINE=InnoDB;
+</pre>
+<br>
+<a href=https://stackoverflow.com/questions/43859351/why-are-references-to-wp-postmeta-so-slow>StackOverflow</a><br>
+<a href=https://wordpress.stackexchange.com/questions/248207/simple-sql-query-on-wp-postmeta-very-slow>WordPress forum - on slow postmeta</a><br>
+<br>
+The <tt>ALTER</tt> to achieve the desired changes:
+<br>
+<br>
+To see whether you currently have any dup keys for any <tt>post</tt>:
+<pre>
+SELECT post_id, meta_key, GROUP_CONCAT(meta_id)
+    FROM wp_postmeta
+    GROUP BY post_id, meta_key
+    HAVING COUNT(*) > 1
+    LIMIT 5;
+</pre>
+<br>
+This removes <tt>meta_id</tt>, which is probably useless and definitely a performance burden:
+<pre>
+ALTER TABLE wp_postmeta
+    DROP PRIMARY KEY,
+    DROP COLUMN meta_id,
+    DROP INDEX post_id,
+    ADD PRIMARY KEY(post_id, meta_key);  -- does not allow dup meta_key for a post
+</pre>
+<br>
+This is a compromise -- it keeps <tt>meta_id</tt>, but makes most of the other performance improvements:
+<pre>
+ALTER TABLE wp_postmeta
+    DROP PRIMARY KEY,
+    DROP INDEX post_id,
+    ADD PRIMARY KEY(post_id, meta_key, meta_id),  -- to allow dup meta_key for a post
+    ADD INDEX(meta_id);    -- to keep AUTO_INCREMENT happy
+</pre>
+<br>
+Consider changing <tt>wp_commentmeta</tt>, <tt>wp_sitemeta</tt>, <tt>wp_termmeta</tt>, and <tt>wp_usermeta</tt> in similar ways.
+<br>
+<br>
+Another WP tip:  If you often have self-joins to test multiple meta attributes, decrease the value of <tt>optimizer_search_depth</tt> to, say, 4.
+<br>
+<br>
+<a href=https://stackoverflow.com/a/42310635/1766831>A testimonial</a><br>
+<a href=https://stackoverflow.com/questions/43859351/why-are-references-to-wp-postmeta-so-slow>An example, with ALTER</a><br>
+<br>
+<a name=explain><h2>EXPLAIN</h2>
+<br>
+The <tt>EXPLAIN</tt> command helps give you some insight into what is going on, but fails to direct you towrard betters indexing or query formulation.  Anyway, here are the options:
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;1.&nbsp;&nbsp;<tt>EXPLAIN</tt> is quite limited.  It does not handle <tt>LIMIT</tt> very well, nor does it necessarily say which step uses the filesort, or even if there are multiple filesorts.  In general, the "Rows" column is useful, but in certain situations, it is useless.  Simple rule:  A big number is probably a bad sign.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;2.&nbsp;&nbsp;<tt>EXPLAIN EXTENDED</tt> + <tt>SHOW WARNINGS;</tt> provides the rewritten version of the query.  This does not do a lot.  It does give clues of the distinction between <tt>ON</tt> and <tt>WHERE</tt> in <tt>JOINs</tt>.  (In newer versions <tt>EXTENDED</tt> is not needed; you still get the <tt>WARNING</tt>.)
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;3.&nbsp;&nbsp;<tt>EXPLAIN FORMAT=JSON</tt> provide more details into the cost-based analysis and spells out various steps, including filesorts.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;4.&nbsp;&nbsp;"Optimizer trace" goes a bit further.  (It is rather tedious to read.)  See next section.
+<br>
+<br>
+<a name=optimizer_trace><h2>Optimizer Trace</h2>
+<br>
+This is available beginning with 5.6.3.
+<br>
+<pre>
+SET optimizer_trace_offset=-11,
+    optimizer_trace_limit=11,
+    optimizer_trace='enabled=on';
+SELECT ...                        -- Your query
+SET optimizer_trace='enabled=off';
+SELECT * FROM INFORMATION_SCHEMA.OPTIMIZER_TRACE;
+</pre>
+<br>
+This last thing will produce a "table" with 4 columns.  Here is some PHP code to handle that if you get an array of arrays:
+<br>
+<pre>
+        foreach ($opt_traces as $opt_trace)
+        {
+            list($query, $trace, $mbbmms, $priv) = $opt_trace;
+            echo "Optimizer Trace:&lt;pre>$trace&lt;/pre>\n";          // This will be JSON.
+            if ($mbbmms)
+                echo "$mbbmms bytes missing beyond max_mem_size&lt;br>\n";
+            if ($priv)
+                echo "Insufficient privileges for optimizer trace&lt;br>\n";
+        }
+</pre>
+<br>
+For even a moderately complex SELECT, you may exceed the current setting of <tt>optimizer_trace_max_mem_size</tt>; Set it higher in the initial sets if needed.
+<br>
+<br>
+<a name=handler_counts><h2>Handler counts</h2>
+<br>
+The "Rows" of <tt>EXPLAIN</tt> gives an <i>estimate</i> of the number of rows touched.  Sometimes this is a terrible estimate.  There is a way to get the exact number of rows:  <tt>SHOW SESSION STATUS LIKE 'Handler%';</tt>.  In some situations, this is an excellent way to get a feel for a specific query, or to compare two similar queries/indexes/etc.
+<br>
+<pre>
+FLUSH STATUS;  -- zero out most of SESSION STATUS (non existent on really old versions of MySQL)
+SELECT ...;    -- run your query
+SHOW SESSION STATUS LIKE 'Handler%';
+</pre>
+<br>
+Sum up the <tt>Handler_read_%</tt> values to get what is perhaps an exact count of how many rows (index and/or table) are touched in peforming the <tt>SELECT</tt>.  If there are non-zero values for <tt>Handler_write_%</tt>, then temp table(s) were created for this query.
+<br>
+<br>
+(Note:  Using the equivalent <tt>SELECT ... FROM information_schema.session_status</tt> is ineffective since it includes some of this select itself.)
+<br>
+<br>
+<a href=https://stackoverflow.com/a/51226530/1766831>Example of Handler Counts</a><br>
+<br>
+<a name=explain_analyze><h2>EXPLAIN ANALYZE</h2>
+<br>
+MySQL 8.0.18 introduced <tt>EXPLAIN ANALYZE</tt> and <tt>EXPLAIN ANALYZE FORMAT=JSON</tt> as a way to get more info on a <tt>SELECT</tt>.
+<br>
+<br>
+TBD
+<br>
+<br>
+<a name=sequence><h2>Sequence</h2>
+<br>
+Here's a possible implementation of a "sequence".
+<br>
+<br>
+Setup:
+<pre>
+    CREATE TABLE seq (
+        id INT UNSIGNED AUTO_INCREMENT NOT NULL,
+        code CHAR(1) NOT NULL,
+        PRIMARY KEY(id),
+        UNIQUE(code)
+    ) ENGINE=InnoDB  COMMENT 'An implementation of a SEQUENCE';
+
+    INSERT INTO seq (code) VALUE ('a');   -- initialize only
+</pre>
+<br>
+Usage:
+<pre>
+    INSERT INTO seq (code) VALUE ('a')
+        ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id+1);
+    SELECT LAST_INSERT_ID();  -- to retrieve the new number:
+</pre>
+<br>
+Notes:
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;This allows multiple sequences, based on <tt>code</tt>.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;The nums will be monotonically increasing (never dup, never decrease).
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;It will provide consecutive numbers (no gaps).
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;It will not back-fill.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;It will survive crashes; deletes from your table; etc.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;If you get a new number <i>inside</i> a transaction, replication could generate the ids not in chronological order.
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;If you get a new number <i>outside</i> a transaction (autocommit), you could 'burn' the number (create a gap) if certain failures occur.
+<br>
+<br>
+In MariaDB 10.0+, see
+<br>
+<br>
+<a href=https://mariadb.com/kb/en/sequence-overview/>CREATE SEQUENCE</a><br>
+<br>
+<tt>SELECT * FROM seq_1_to_5;</tt>
+<a href=https://mariadb.com/kb/en/sequence-storage-engine/>MariaDB's Sequence engine for generating numbers</a><br>
+<pre>
+SELECT '2019-01-01' + INTERVAL seq-1 DAY     FROM seq_1_to_31;
++-----------------------------------+
+| '2019-01-01' + INTERVAL seq-1 DAY |
++-----------------------------------+
+| 2019-01-01                        |
+| 2019-01-02                        |
+| 2019-01-03                        |
+| 2019-01-04                        |
+| 2019-01-05                        |
+| 2019-01-06                        |
+</pre>
+<br>
+<a name=miscellany><h2>Miscellany</h2>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;"Index merge intersection" is <i>perhaps always</i> not as good as a composite index.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;"Index merge union" is almost never used.  You might be able to turn <tt>OR</tt> into <tt>UNION</tt> effectively.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;Something often forgotten about (but does show up as an unexplained large "Rows"): <tt>COLLATIONs</tt> must match.  This may show up when JOINing on a string column but failing to use the same <tt>CHARACTER SET</tt> and/or <tt>COLLATION</tt> for the columns in both tables.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;A trick to make use of the PK clustering:  <tt>PRIMARY KEY(foo, id), INDEX(id)</tt>.  This comes in handy when many queries say <tt>WHERE foo = ...</tt> but need <tt>id</tt> for uniqueness.  A table too big for the buffer_pool benefits especially.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>FORCE INDEX</tt> is handy for experimenting, but almost always a bad idea for production.  "It may help today, but the data will change tomorrow and make things worse."
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;When are a pair of UNIQUE/non-UNIQUE indexes redundant?  See
+<a href=https://stackoverflow.com/a/32298311/1766831>this stackoverflow answer</a><br>
+<a href=https://dba.stackexchange.com/a/306418/1876>UNIQUE</a><br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;There are few cases where a table should have multiple <tt>UNIQUE</tt> (or PRIMARY) keys.  A common, simple, one that is valid is a normalization table that maps between an auto_increment id and a name.
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<a href=https://stackoverflow.com/a/61032193/1766831>WHERE + ORDER BY + LIMIT example</a>
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<a href=https://mysql.rjweb.org/doc.php/deletebig#iterating_through_a_compound_key>Iterating through a composite index (Continuing where you left off)</a>
+<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&#9864;&nbsp;&nbsp;<tt>WHERE varchar_col = 1234</tt> (string compared to literal number) -- This is slow because each string is converted to a number to test.  Either quote the number or change the column type.
+<br>
+<br>
+<a href=https://dev.mysql.com/doc/refman/8.0/en/type-conversion.html>Ref manual on type conversions</a><br>
+<br>
+<a name=postlog><h2>Postlog</h2>
+<br>
+Initial posting: March, 2015; &nbsp; Refreshed: Feb, 2016; &nbsp; Add DATE: June, 2016; &nbsp;
+WP example: May and Sep, 2017; &nbsp;
+Explain, Opt trace, and Miscellany: Jan, 2019 &nbsp;
+ICP & derived tables & refresh: May, 2019 &nbsp;
+Sequence: Aug, 2019 &nbsp;
+<br>
+<br>
+Except as noted, the tips in this document apply to MySQL, MariaDB, and Percona.
+Some of the optimizations depend on the way InnoDB 'clusters' the PRIMARY KEY with the data.
+Since this is not the case for some other Engines and Vendors, some of the tips may not apply elsewhere.
+<!--
+<a href=https://www.essentialsql.com/what-is-a-database-index/>Basics of indexing</a><br>
+-->
+<br>
+<br>
+<a href=https://stackoverflow.com/questions/75925056/understand-multiple-column-index-for-mysql>Understanding composite index</a><br>
+<a href=../slides/IndexCookbook.pdf>Percona 2015 Tutorial Slides</a><br>
+<a href=https://www.youtube.com/watch?v=e39-UfxQCCs>Sheeri Cabral's Index talk</a><br>
+<a href=https://www.youtube.com/watch?v=OlclCoWXplg>Sheeri's EXPLAIN talk</a><br>
+<a href=https://www.slideshare.net/billkarwin/how-to-design-indexes-really>Bill Karwin on designing indexes</a><br>
+Some info in the manual:
+<a href=https://dev.mysql.com/doc/refman/5.7/en/order-by-optimization.html>ORDER BY Optimization</a><br>
+A short, but complicated,
+<a href=https://stackoverflow.com/questions/28974572/mysql-index-for-order-by-with-date-range-in-where>example</a><br>
+<a href=https://stackoverflow.com/a/68320347/1766831>"20%" rule"</a><br>
+<a href=https://dev.mysql.com/doc/refman/5.7/en/range-optimization.html#range-access-multi-part>Manual page on range accesses in composite indexes</a><br>
+<a href=https://dba.stackexchange.com/questions/120551/very-slow-query-not-sure-if-mysql-index-is-being-used>Some discussion of JOIN</a><br>
+<a href=https://stackoverflow.com/questions/35100721/how-can-i-detect-if-an-mysql-index-is-necessary-or-required>Detecting whether an index is needed</a><br>
+This blog is the consolidation of a Percona tutorial I gave in 2013, plus many years of experience in
+fixing thousands of slow queries on hundreds of systems.
+I appologize that this does not tell you how create INDEXes for <i>all</i> SELECTs.  Some are just too complex.
+<a href=https://www.percona.com/blog/2015/04/27/indexing-101-optimizing-mysql-queries-on-a-single-table/>Indexing 101: Optimizing MySQL queries on a single table</a><br>
+(Stephane Combaudon - Percona)
+<a href=https://stackoverflow.com/a/37024870/1766831>A complex query, well explained.</a><br>
+<a href=https://www.percona.com/blog/2009/03/05/what-does-using-filesort-mean-in-mysql/>What does Using filesort mean in MySQL?</a><br>
+<a href=https://dba.stackexchange.com/a/205366/1876>JOIN - with step-by-step explanation</a><br>
+<a href=https://dba.stackexchange.com/a/205367/1876>Do not start index with a 'range'</a><br>
+<a href=https://dba.stackexchange.com/questions/206989/with-and-without-autoincremented-id-performance>Natural PK vs AUTO_INCREMENT debate</a><br>
+<a href=https://github.com/jynus/query-optimization/blob/5c52d2969d95bbc95e50c275ba6324cbbac0814c/Query%20Optimization:%20From%200%20to%2010%20(and%20up%20to%205.7).pdf>3-hour slides from Jynus</a><br>
+<a href=https://stackoverflow.com/a/52033986/1766831>Which to pick - WHERE or ORDER BY</a><br>
+<a href=https://stackoverflow.com/a/53419710/1766831>A moderately involved example</a><br>
+<a href=https://dba.stackexchange.com/questions/223301/mysql-range-optimization-and-multipart-index>Key_len inconsistencies</a><br>
+- Also see the blogs referred to.
+<a href=https://github.com/jynus/query-optimization/blob/master/Query%20Optimization:%20From%200%20to%2010%20(and%20up%20to%205.7).odp>Slides</a><br>
+with good pictures on how a BTree works, the order of columns in an index, etc.
+<a href=https://stackoverflow.com/questions/55962268/mariadb-building-the-bset-index-for-a-given-select-group-by>Discuss step 2b</a><br>
+<a href=https://dev.mysql.com/doc/refman/5.7/en/internal-temporary-tables.html>Temporary tables used in indexing</a><br>
+<a href=https://dba.stackexchange.com/a/249909/1876>Why we can't have more than one inequality condition in MySQL indexing?</a><br>
+Examples of when OR, LIKE, etc is / isn't optimizable:
+<a href=https://stackoverflow.com/a/60344360/1766831>Sargability of various tests</a><br>
+<a href=https://stackoverflow.com/questions/62045770/why-does-mysql-not-always-use-index-for-select-query>Why does MySQL not always use index for select query?</a><br>
+<a href=https://stackoverflow.com/a/32298311/1766831>Some duplicate index examples</a><br>
+Some more advanced topics; includes diagrams of how indexes are laid out:
+<a href=https://www.percona.com/live/e18/sites/default/files/slides/Query%20Optimization%20with%20MySQL%208.0%20and%20MariaDB%2010.3_%20The%20Basics%20-%20FileId%20-%20160092.pdf>Advanced</a><br>
+<a href=https://stackoverflow.com/a/62501593/1766831>Which to use? a range or an ORDER BY</a><br>
+<a href=https://stackoverflow.com/a/60049742/1766831>Order of joins; indexing</a><br>
+<a href=https://dba.stackexchange.com/a/301572/1876>Covering versus Leftmost</a><br>
+<a href=https://stackoverflow.com/questions/70754587/is-there-any-significant-benefit-in-adding-multi-column-indices-in-mysql-over-ha>A specific 3-column case with LIMIT</a><br>
+<a href=https://stackoverflow.com/a/40142406/1766831>Examples</a><br>
+[[https://stackoverflow.com/questions/24315151/does-order-of-fields-of-multi-column-index-in-mysql-matter][Order of fields]] (last_name, first_name discussion)
+<a href=https://stackoverflow.com/a/72480108/1766831>Indexing 101 and 102</a><br>
+<a href=https://dev.mysql.com/doc/refman/8.0/en/innodb-index-types.html>Ref man on cluster vs secondary</a><br>
+<a href=https://stackoverflow.com/a/72483897/1766831>Comparing Full table/index scans</a><br>
+<a href=https://stackoverflow.com/a/54992906/1766831>Example of combining composite indexes</a><br>
+<a href=https://stackoverflow.com/a/72807438/1766831>Discussion of the 20% RoT</a><br>
+<a href=https://stackoverflow.com/a/3197470/1766831>Nice, basic, discussion of Indexing</a><br>
+Matching the <tt>ORDER BY</tt> to the <tt>WHERE</tt> lets the <tt>LIMIT</tt> be optimized:
+https://stackoverflow.com/a/74212407/1766831
+<a href=https://stackoverflow.com/a/74322626/1766831>Example of JOINs and discussion of Explode-Implode</a><br>
+<a href=https://stackoverflow.com/a/74636656/1766831>Nice discussion of composite + covering example</a><br>
+<a href=https://dba.stackexchange.com/questions/321514/in-mysql-mariadb-do-indexes-performance-degrade-as-they-become-larger-and-larg>Discussion of some of the subtle points above</a><br>
+<a href=https://dba.stackexchange.com/a/321826/1876>Auto_inc vs natural PK</a><br>
+<a href=https://stackoverflow.com/a/75216578/1766831>Examples of rows/block and indexes</a><br>
+<a href=https://dba.stackexchange.com/questions/323388/mysql-select-query-slow-despite-having-indexes>A deteailed discussion of one case</a><br>
+[[https://www.percona.com/blog/mysql-8-0-functional-indexes/][Functional indexes (8.0.13) and Generated columns (5.7)]
+<a href=https://stackoverflow.com/a/76510457/1766831>Book DB - indexing, normalizing</a><br>
+<a href=https://stackoverflow.com/a/76583263/1766831>Joins, Left Join, derived tables, advice</a><br>
+<a href=https://stackoverflow.com/a/76740840/1766831>Examples of Leftmost (ordering columns in an INDEX)</a><hr width="100%">-- Rick James<br>
+<br><head>
+<style>
+p {margin-top:0.7em; margin-bottom:0.7em;}
+</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset=UTF-8>
+</head>
+
+<h2>MySQL Documents by Rick James</h2>
+<i>HowTo Techniques for Optimizing Tough Tasks:</i><br>
+<p><a href=partitionmaint><b>Partition</b> Maintenance (DROP+REORG)</a> for time series (includes list of PARTITION uses)
+<p><a href=deletebig>Big <b>DELETEs</b> - how to optimize</a> -- and other chunking advice, plus a use for PARTITIONing
+<br> &nbsp; &nbsp;
+    <a href=deletebig#deleting_in_chunks><b>Chunking</b> lengthy DELETE/UPDATE/etc.</a>
+<p>Data Warehouse techniques:
+<br> &nbsp; &nbsp;
+    <a href=datawarehouse><b>Data Warehouse</b> Overview</a> &nbsp;
+    <a href=summarytables><b>Summary</b> Tables</a> &nbsp;
+    <a href=staging_table>High speed <b>ingestion</b></a> &nbsp;
+    <a href=staging_table#normalization>Bulk <b>Normalization</b></a> &nbsp;
+<p><a href=mysql_sensor>Schema and code design for large <b>Sensor</b> database</a> 
+<p><a href=eav>Entity-Attribute-Value (<b>EAV</b>)</a> -- a common, poorly performing, design pattern; plus an alternative
+<p><a href=find_nearest_in_mysql>5 methods for <b>'Find Nearest'</b></a>
+<p><a href=latlng><b>Lat/Lng search</b> to Find the nearest 10 pizza parlors</a></b> 
+<br> &nbsp; &nbsp;
+    <a href=latlng#representation_choices>Lat/Long representation choices</a>
+<p><a href=zorder_in_mysql><b>Z-Order</b> 'find nearest'</a></a>
+<p><a href=pagination><b>Pagination,</b> not with OFFSET, LIMIT</a>
+<p><a href=random>Techniques on efficiently finding a <b>random</b> row</a> (On beyond ORDER BY RAND())
+<p><a href=uuid><b>GUID/UUID</b> Performance (type 1 only)</a>
+<p><a href=ipranges><b>IP Range</b> Table Performance</a> -- or other disjoint ranges
+<p><a href=uniques>Rollup <b>Unique User Counts</b></a>
+<p><a href=alterhuge><b>Alter</b> of a Huge table</a> -- Mostly obviated by 5.6
+<p><a href=lists>Efficient <b>List</b> of Latest 10 news articles</a>
+<p><a href=pivot>Build and execute a <b>Pivot</b> SELECT</a> (showing rows as columns)
+<p><a href=groupwise_max>(<b>Groupwise Max</b>): Efficiently find largest row(s) for each group</a>
+
+
+<br><br><i>Other Tips, Tuning, Debugging, Optimizations, etc...</i>
+<br>
+<p><a href=ricksrots><b>Rick's RoTs</b></a> (Rules of Thumb -- lots of tips)
+<!-- ordered approximately in freq of referencing it (rjwebct.php) -->
+<p><a href=schema_best_practices_mysql><b>Datatypes</b> and building a good schema</a>
+<p><a href=memory><b>Memory</b> Allocation (caching, etc)</a>
+<p><a href=charcoll>Character Set and Collation problem solver</a>
+<br> &nbsp; &nbsp;
+    <a href=https://stackoverflow.com/questions/38363566/trouble-with-utf8-characters-what-i-see-is-not-what-i-stored><b>Trouble with UTF-8</b></a> &nbsp;
+    If you want case folding, but accent sensitivity, please file a request at https://bugs.mysql.com .
+<br> &nbsp; &nbsp;
+    <a href=charcoll#python>Python tips</a>, &nbsp; 
+    <a href=charcoll#php>PHP tips</a>, &nbsp; 
+    <a href=charcoll#other_computer_languages>other language tips</a>
+<br> &nbsp; &nbsp;
+    <a href=../utf8_collations.html>utf8 Collations</a> &nbsp;
+    <a href=../utf8mb4_collations.html><b>utf8mb4 Collations</b> on 8.0</a>
+<p><a href=myisam2innodb>Converting from </b>MyISAM</b> to InnoDB</a> -- includes differences between them
+<p><a href=index1>Compound INDEXes</a> plus other insights into the mysteries of INDEXing
+<p><a href=index_cookbook_mysql>Cookbook for Creating <b>Indexes</b></a>
+<br> &nbsp; &nbsp;
+    <a href=index_cookbook_mysql#many_to_many_mapping_table><b>Many-to-many</b> mapping table</a> &nbsp; 
+    <a href=index_cookbook_mysql#handler_counts><b>Handler</b> counts</a> &nbsp;
+    <a href=index_cookbook_mysql#speeding_up_wp_postmeta><b>wp_postmeta</b></a> &nbsp; 
+    <a href=index_cookbook_mysql#or>UNION+OFFSET</a>
+<p><a href=limits>MySQL <b>Limits</b></a> -- built-in hard limits
+<br> &nbsp; &nbsp;
+    <a href=limits#767_limit_in_innodb_indexes>767-byte INDEX limit</a>
+<p><a href=galera><b>Galera</b>, tips on converting to</a> (Percona XtraDB Cluster, MariaDB 10, or manually installed)
+<p><a href=queryrewrite>5.7's Query Rewrite</a> -- perhaps 5.7's best perf gain, at least for this forum's users
+<!-- p><a href=../bestof.html><b>Best of MySQL Forum</b></a> -- index of lots of tips, discussions, etc
+ < -->
+
+<br>
+<p><a href=mysql_analysis><b>Analyze</b> MySQL Performance</a>
+<br> &nbsp; &nbsp;
+    <a href=mysql_analysis#tuning>Analyze VARIABLEs and GLOBAL STATUS</a> &nbsp; &nbsp;
+    <a href=mysql_analysis#slow_queries_and_slowlog>Analyze SlowLog</a>
+
+<BR>
+<BR>
+
+<b>My slides from conferences</b>
+<br><a href=https://www.youtube.com/watch?v=REKcRyVzaIY><b>MiniFest 2021</b></a> - Rick James & Daniel Black - Answering on Stack Overflow(+comments) - MariaDB Frontlines
+<br><a href=/slides/rots.pdf>Percona Live 4/2017 - <b>Rick's RoTs (Rules of Thumb)</b> - MySQL/MariaDB</a>
+<br><a href=/slides/cook.pdf>Percona Live 4/2017 - <b>Index Cookbook</b> - MySQL/MariaDB</a>
+<br><a href=/slides/Partition.pdf>Percona Live 9/2015 - <b>PARTITIONing</b> - MySQL/MariaDB</a>
+
+<BR>
+<BR>
+
+<!-- form action=search.php>
+    <input type=text name=str size=40>
+    <input type=submit value="Search online MySQL docs">
+</form -->
+
+Contact me via LinkedIn; be sure to include a brief teaser in the Invite request:
+&nbsp;
+<a href="https://www.linkedin.com/pub/rick-james/5/541/501">
+    <img src="https://static.licdn.com/scds/common/u/img/webpromo/btn_profile_bluetxt_80x15.png"
+         width="80" height="15" border="0" alt="View Rick James's profile on LinkedIn">
+</a>
+
+<h4>Did my articles help you out? Like what you see? Consider donating:</h4>
+<div><a href="https://paypal.me/mysqlgeek/4" class="button button-big">☕️ Buy me a Banana Latte and bagel ($10)</a>
+There is no obligation but it would put a utf8mb4 smiley 🙂 on my face, instead of the Mojibake "ðŸ™‚"
+</div>
+
+<!-- img src="oace.png" -->

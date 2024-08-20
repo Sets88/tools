@@ -111,7 +111,7 @@ class Client():
             worker = asyncio.create_task(self.worker(start, end))
             workers.append(worker)
 
-        await asyncio.gather(*workers, return_exceptions=True)
+        await asyncio.gather(*workers)
 
 
 if __name__ == '__main__':
