@@ -1,10 +1,12 @@
+import asyncio
+
+
 async def fn():
     await asyncio.sleep(2)
     return 'test'
 
 
 def awaitc(coro):
-    import asyncio
     import threading
 
     result = {"result": None}
