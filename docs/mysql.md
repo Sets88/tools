@@ -7,6 +7,7 @@ Which doen't increase auto_increment field unlike raw INSERT ... ON DUPLICATE KE
         SELECT 'some_name', 'some_data' WHERE @been_updated IS NULL
     ON DUPLICATE KEY UPDATE value=VALUES(value);
 
+
 # Debug the query using the optimizer log
 
     SET SESSION optimizer_trace="enabled=on";
@@ -19,13 +20,29 @@ Which doen't increase auto_increment field unlike raw INSERT ... ON DUPLICATE KE
 
     SELECT * FROM information_schema.INNODB_TRX
 
-# All requests within the transaction
+Use trx_mysql_thread_id to proceed - 1234, this value also may be found in SHOW PROCESSLIST
 
-    SELECT * FROM performance_schema.events_statements_current WHERE THREAD_ID=1234
+
+# Last requests within the transaction
+
+    SELECT t.THREAD_ID, t.PROCESSLIST_ID, t.PROCESSLIST_USER, t.PROCESSLIST_HOST, stmt.TIMER_WAIT, stmt.SQL_TEXT, stmt.CURRENT_SCHEMA
+    FROM performance_schema.events_statements_current AS stmt
+    INNER JOIN performance_schema.threads AS t ON t.THREAD_ID=stmt.THREAD_ID
+    WHERE t.PROCESSLIST_ID=1234
+
+
+# Get last queries within transaction
+
+    SELECT t.THREAD_ID, t.PROCESSLIST_ID, t.PROCESSLIST_USER, t.PROCESSLIST_HOST, stmt.SQL_TEXT, stmt.CURRENT_SCHEMA
+    FROM performance_schema.events_statements_history AS stmt
+    LEFT JOIN performance_schema.threads AS t ON performance_schema.stmt.THREAD_ID=t.THREAD_ID
+    WHERE t.PROCESSLIST_ID=1234
+
 
 # All requests pending record lock
 
     SELECT * FROM sys.innodb_lock_waits
+
 
 # All requests awaiting table metadata lock
 
