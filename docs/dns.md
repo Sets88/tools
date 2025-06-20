@@ -20,7 +20,7 @@ Contains a domain name of DNS serving current DNS zone
 
 ## CNAME
 
-Is a link pointing to other dns record, requesting A record from this record it 
+Is a link pointing to other dns record
 
 ## TXT
 
@@ -28,3 +28,4 @@ Contains any text record
 
 ## MX
 
+Contains the email server address responsible for email delivery for this domain
