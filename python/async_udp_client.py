@@ -37,9 +37,10 @@ async def client():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         recvq = asyncio.Queue()
         sndq = asyncio.Queue()
-        sock.connect(('127.0.0.1', 12312))
 
         loop = asyncio.get_running_loop()
+
+        await loop.sock_connect(sock, ('127.0.0.1', 12312))
 
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: DatagramProtocol(recvq=recvq, sndq=sndq),

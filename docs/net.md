@@ -59,3 +59,28 @@ In the file `/etc/wireguard/wg0.conf`
 WireGuard on the client:
 In the file `/etc/wireguard/wg0.conf`
 - In the [Peer] section, `Endpoint` should be equal to the address and port on which the UDPspeeder client waits for a connection, in our case, this is 3333
+
+
+# Redirect network traffic to another server on a specific port using iptables
+
+
+
+## DNAT from one host to another
+
+```
+iptables -t filter -I FORWARD -s 10.176.0.0/16 -j ACCEPT
+iptables -t nat -I PREROUTING -p tcp -d 10.0.0.2 --dport 6379 -j DNAT --to-destination 10.0.0.3:6379
+iptables -t nat -I OUTPUT -p tcp -d 10.0.0.2 --dport 6379 -j DNAT --to-destination 10.0.0.3:6379
+iptables -t nat -I POSTROUTING -d 10.0.0.3 -o eth0 -j MASQUERADE
+```
+
+## To break and delete established connections - send reset from FORWARD:
+
+```
+iptables -I FORWARD -p tcp --dport 6379 -j REJECT --reject-with tcp-reset
+```
+
+## List src IPs of established network connections:
+```
+conntrack -L -p tcp --state ESTABLISHED | grep -oP 'src=\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort |uniq -c
+```

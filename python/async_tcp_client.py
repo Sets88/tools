@@ -13,7 +13,9 @@ async def client():
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        sock.connect(('127.0.0.1', 12312))
+        loop = asyncio.get_running_loop()
+
+        await loop.sock_connect(sock, ('127.0.0.1', 12312))
 
         # Or on no need to set socket opts just
         #reader, writer = await asyncio.open_connection('127.0.0.1', 12312, ssl=ssl_context)
