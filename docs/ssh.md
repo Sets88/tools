@@ -12,7 +12,8 @@ after successful connection H1 going to have open local port 1234 which is actua
 
     ## bring port 22 on othermachine.com reachable by 11.22.33.44 to localhost:1234
     ssh -L 1234:othermachine.com:22 -N user@11.22.33.44
-
+    ## Bring unix socket /var/run/mysqld/mysqld.sock from 11.22.33.44 to your local machine /tmp/mysql.sock
+    ssh -L /tmp/mysql.sock:/var/run/mysqld/mysqld.sock -N user@11.22.33.44
 
 Create SOCKS4/SOCKS5 proxy on port 1234 of localhost, traffic will be forwarded thru 11.22.33.44 machine
 
