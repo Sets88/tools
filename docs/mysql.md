@@ -31,12 +31,19 @@ Use trx_mysql_thread_id to proceed - 1234, this value also may be found in SHOW 
     WHERE t.PROCESSLIST_ID=1234
 
 
-# Get last queries within transaction
+# Get last queries within session
 
-    SELECT t.THREAD_ID, t.PROCESSLIST_ID, t.PROCESSLIST_USER, t.PROCESSLIST_HOST, stmt.SQL_TEXT, stmt.CURRENT_SCHEMA
+    SELECT t.THREAD_ID, t.PROCESSLIST_ID, t.PROCESSLIST_USER, t.PROCESSLIST_HOST, stmt.SQL_TEXT, stmt.CURRENT_SCHEMA, stmt.PROCESSLIST_STATE
     FROM performance_schema.events_statements_history AS stmt
     LEFT JOIN performance_schema.threads AS t ON performance_schema.stmt.THREAD_ID=t.THREAD_ID
     WHERE t.PROCESSLIST_ID=1234
+
+
+# Just raw query history including those done inside transactions, includes many columns describing query
+
+    SELECT *
+    FROM performance_schema.events_statements_history AS stmt
+    LEFT JOIN performance_schema.threads AS t ON performance_schema.stmt.THREAD_ID=t.THREAD_ID
 
 
 # All requests pending record lock
